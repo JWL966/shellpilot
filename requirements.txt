@@ -1,0 +1,4 @@
+# 依赖
+aiohttp>=3.9
+paramiko>=3.4
+"psycopg[binary]>=3.1"

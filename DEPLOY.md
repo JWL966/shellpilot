@@ -1,0 +1,565 @@
+# ShellPilot 启动与部署文档
+
+面向：在本机（Windows）运行、以及部署到 Linux 服务器长期运行。
+
+> 所有命令均在 Git Bash 下验证过（项目根目录为克隆下来的 `shellpilot` 目录）。
+> 若使用 cmd / PowerShell，注意路径分隔符与 `taskkill` 参数：cmd 用 `/PID`，Git Bash 用 `//PID`。
+
+---
+
+## 0. 三分钟快速启动（已部署过的机器）
+
+```bash
+cd shellpilot
+python server/app.py
+```
+
+浏览器打开 <http://127.0.0.1:8765>。
+
+首次部署（新机器）请按第 1～3 节依次执行。
+
+---
+
+## 1. 环境要求
+
+| 组件 | 要求 | 本机实测 |
+|---|---|---|
+| Python | ≥ 3.10 | 3.12.10 |
+| PostgreSQL | ≥ 12 | 18.3（服务名 `postgresql-x64-18`，端口 5432） |
+| 浏览器 | Chrome / Edge 等现代浏览器 | — |
+
+Python 依赖（`requirements.txt`）：
+
+| 包 | 作用 | 本机实测版本 |
+|---|---|---|
+| `aiohttp` | Web 服务 + WebSocket + 调 LLM | 3.14.5 |
+| `paramiko` | SSH 连接与命令执行 | 5.1.0 |
+| `psycopg[binary]` | PostgreSQL 驱动 | 3.3.9 |
+
+---
+
+## 2. 首次部署（Windows 本机）
+
+### 2.1 安装 Python 依赖
+
+```bash
+cd E:/shellpilot
+
+# 建议用虚拟环境（可选）
+python -m venv .venv
+source .venv/Scripts/activate      # Git Bash；cmd 用 .venv\Scripts\activate.bat
+
+pip install -r requirements.txt
+
+# 首次运行前生成配置文件（含密钥，已被 .gitignore 排除）
+cp config.example.json config.json      # cmd: copy config.example.json config.json
+```
+
+验证：
+
+```bash
+python -c "import aiohttp, paramiko, psycopg; print('deps ok')"
+```
+
+### 2.2 准备 PostgreSQL
+
+程序启动时**只自动建表，不会自动建库**（`server/session.py:60` 的 `init_db()` 执行 `CREATE TABLE IF NOT EXISTS`）。
+所以第一次必须先创建数据库 `shellpilot`。
+
+`psql` 未加入 PATH 时用完整路径（`C:\Program Files\PostgreSQL\18\bin\psql.exe`）：
+
+```bash
+"C:/Program Files/PostgreSQL/18/bin/psql.exe" -U postgres -h 127.0.0.1 -p 5432 \
+  -c "CREATE DATABASE shellpilot;"
+```
+
+或者不用 psql，直接用 Python 建库：
+
+```bash
+python - <<'PY'
+import psycopg
+with psycopg.connect("host=127.0.0.1 port=5432 dbname=postgres user=postgres password=123456", autocommit=True) as c:
+    with c.cursor() as cur:
+        cur.execute("SELECT 1 FROM pg_database WHERE datname='shellpilot'")
+        if not cur.fetchone():
+            cur.execute("CREATE DATABASE shellpilot")
+            print("created shellpilot")
+        else:
+            print("already exists")
+PY
+```
+
+确认服务在跑：
+
+```bash
+sc query postgresql-x64-18 | grep STATE
+# 应为 STATE : 4  RUNNING
+```
+
+> 生产环境请把密码改成环境变量传入的方式，不要硬编码在文档/命令历史里（见 3.2 节）。
+
+### 2.3 启动服务
+
+```bash
+python server/app.py
+```
+
+预期输出：
+
+```
+ShellPilot 启动: http://127.0.0.1:8765
+```
+
+此时前台阻塞：**关闭终端 = 停止服务**。需要常驻见第 6 节。
+
+### 2.4 验证启动成功
+
+```bash
+curl -s http://127.0.0.1:8765/api/health
+# {"status": "ok"}
+
+curl -s http://127.0.0.1:8765/api/config/llm
+# 能看到 base_url / model / models / has_api_key，api_key 已脱敏为 ********
+```
+
+浏览器打开 <http://127.0.0.1:8765>，然后：
+
+1. **设置** 页填 API Base URL（须含 `/v1`）、API Key、默认模型名、可选模型列表（每行一个）→「测试连接」→「保存」
+2. **服务器管理** 页添加 Linux 主机 →「测试连接」确认 SSH 可达
+3. **对话** 页选择目标服务器与模型 → 提问
+
+---
+
+## 3. 配置说明
+
+配置存在项目根目录的 `config.json`（**含密钥，不要提交、不要外传**）。
+
+### 3.1 LLM 配置
+
+```json
+{
+  "llm": {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "sk-...",
+    "model": "deepseek-chat",
+    "models": ["deepseek-chat", "deepseek-reasoner"],
+    "timeout": 300,
+    "history_budget_chars": 0
+  },
+  "servers": []
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `base_url` | OpenAI 兼容接口地址，**必须包含 `/v1`**（或网关对应路径） |
+| `api_key` | 走 `Authorization: Bearer <key>` |
+| `model` | 默认/兜底模型；不在 `models` 里时也会自动出现在下拉框首位 |
+| `models` | 对话页「使用模型」下拉框的候选列表 |
+| `timeout` | 单次 LLM 请求超时（秒），范围 10～600 |
+| `history_budget_chars` | 历史上下文字符上限；**0 = 不裁剪**（大上下文模型推荐），正数则超限后按整轮丢弃最旧内容 |
+
+### 3.2 上下文（历史消息）策略
+
+同一会话的每一轮对话，都会把**之前所有轮次**（用户提问、AI 回复、工具调用参数与命令输出）一起发给模型——这是多轮追问能生效的前提。相关机制：
+
+| 机制 | 位置 | 说明 |
+|---|---|---|
+| 历史加载 | `server/agent.py` `load_history()` | 每轮从 PostgreSQL 读出整个会话历史 |
+| 配对修复 | `server/agent.py` `_sanitize_history()` | 剔除没有响应的 `tool_call`，防止 OpenAI 协议 400 |
+| 长度裁剪 | `server/agent.py` `_trim_history()` | 受 `llm.history_budget_chars` 控制，**默认 0 = 不裁剪** |
+| 中断补齐 | `server/agent.py` `_abort_remaining()` | 用户点「停止」时，为未执行的工具写占位响应 |
+
+**默认不裁剪**：`history_budget_chars: 0` 时每轮把该会话全部历史原样发送，适合 1M 上下文这类大窗口模型。
+
+只有在你主动填入正数（字符数）时才会裁剪，规则是：
+
+- **按整轮**丢弃最旧的对话，当前这一轮永远完整保留，不会切断 `tool_calls` 与 `tool` 响应的配对。
+- 被省略时会在请求里插入一条 system 提示，告知模型早期轮次已省略。
+- 历史体积的主要来源是**命令输出**（单条上限 `OUTPUT_MAX_CHARS = 8000` 字符）。
+- 字符数与 token 的粗略换算：中文约 1.5 字/token，英文与日志约 4 字符/token。
+- 界面左侧的历史会话记录是**完整保存在数据库**的，裁剪只影响发给模型的上下文，不影响回看。
+
+> 即使不裁剪，历史也只会随对话变长。如果模型真的拒收（返回 400 / 上下文超限），
+> 在设置页把「历史上下文上限」填一个正数（如 `800000`）即可开启按轮裁剪。
+
+### 3.3 密钥保存语义
+
+接口保存时的密钥三态（`server/config.py:106`）：
+
+- 传 `null` → 清除密钥
+- 传空串或 `********` → **保持原密钥不变**（页面回显的就是 `********`）
+- 传其他值 → 覆盖
+
+### 3.4 环境变量
+
+| 变量 | 作用 | 默认值 |
+|---|---|---|
+| `SHELLPILOT_CONFIG` | 指定配置文件路径 | `<项目根>/config.json` |
+| `SHELLPILOT_PG_DSN` | PostgreSQL 连接串 | `host=127.0.0.1 port=5432 dbname=shellpilot user=postgres password=123456` |
+
+用环境变量启动示例（避免密码写进配置）：
+
+```bash
+SHELLPILOT_PG_DSN="host=127.0.0.1 port=5432 dbname=shellpilot user=shellpilot_app password=***" \
+python server/app.py
+```
+
+### 3.5 监听地址与端口
+
+`server/app.py:42-43` 当前是**硬编码**：
+
+```python
+host = "127.0.0.1"
+port = 8765
+```
+
+- 只监听本机回环，外网访问不到（这是安全默认值，别轻易改）。
+- 需要换端口，改这两行即可（或改成读环境变量）。
+- 需要远程访问：不要直接把 `host` 改成 `0.0.0.0`，用反向代理 + HTTPS + 登录鉴权，见第 4.3 节。
+
+---
+
+## 4. 访问方式
+
+### 4.1 本机访问
+
+`http://127.0.0.1:8765`
+
+### 4.2 局域网访问
+
+改 `server/app.py` 的 `host` 为 `0.0.0.0`，重启后同网段设备访问 `http://<本机IP>:8765`。
+**仅限受信内网**；Windows 防火墙需放行该端口：
+
+```powershell
+New-NetFirewallRule -DisplayName "ShellPilot 8765" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow
+```
+
+### 4.3 公网访问（务必加保护）
+
+工具具备"在服务器上执行命令"的能力，**绝不能裸奔在公网**。最低要求：
+
+1. 反向代理：Nginx / Caddy 终止 TLS
+2. 访问鉴权：Nginx `auth_basic`、或前置 OAuth / SSO
+3. WebSocket 必须透传（`/ws` 需要 `Upgrade` 头）
+4. 防火墙只放行 443
+
+Nginx 片段：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name ops.example.com;
+
+    ssl_certificate     /etc/nginx/certs/ops.crt;
+    ssl_certificate_key /etc/nginx/certs/ops.key;
+
+    auth_basic           "ShellPilot";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+
+    location / {
+        proxy_pass         http://127.0.0.1:8765;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade $http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        proxy_set_header   Host $host;
+        proxy_read_timeout 3600s;
+    }
+}
+```
+
+---
+
+## 5. 停止 / 重启（Windows）
+
+### 5.1 查端口占用
+
+```bash
+netstat -ano | grep ":8765.*LISTENING"
+#   TCP    127.0.0.1:8765   0.0.0.0:0   LISTENING   39284
+```
+
+最后一列是 PID。
+
+### 5.2 停止
+
+```bash
+taskkill //PID 39284 //F        # Git Bash
+# cmd: taskkill /PID 39284 /F
+```
+
+一行版（Git Bash）：
+
+```bash
+PID=$(netstat -ano | grep ":8765.*LISTENING" | awk '{print $5}' | head -1); \
+[ -n "$PID" ] && taskkill //PID "$PID" //F || echo "服务未在运行"
+```
+
+### 5.3 重启
+
+```bash
+# 停旧进程后再启动新代码
+PID=$(netstat -ano | grep ":8765.*LISTENING" | awk '{print $5}' | head -1); \
+[ -n "$PID" ] && taskkill //PID "$PID" //F
+cd shellpilot && python server/app.py
+```
+
+> `pkill -f "server/app.py"` 在 Windows 上不可靠，用上面的 netstat + taskkill。
+
+---
+
+## 6. 后台常驻运行
+
+### 6.1 Windows：后台启动 + 日志落盘
+
+```bash
+powershell -Command "Start-Process -FilePath 'python' -ArgumentList 'server/app.py' -WorkingDirectory 'E:\shellpilot' -RedirectStandardOutput 'E:\shellpilot\server.out.log' -RedirectStandardError 'E:\shellpilot\server.err.log' -WindowStyle Hidden"
+```
+
+看日志：
+
+```bash
+tail -f E:/shellpilot/server.out.log
+```
+
+> `*.log` 已在 `.gitignore` 中；日志可能含命令输出（甚至敏感信息），注意权限。
+
+### 6.2 Windows：开机自启（任务计划）
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "python" `
+  -Argument "server/app.py" -WorkingDirectory "E:\shellpilot"
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName "ShellPilot" -Action $action -Trigger $trigger `
+  -Settings $settings -Description "ShellPilot AI 远程运维助手" -Force
+```
+
+（需要以管理员身份执行。也可用 `nssm install ShellPilot` 更省事。）
+
+### 6.3 Linux：systemd
+
+```bash
+# 1) 依赖装进虚拟环境
+cd /opt/shellpilot
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# 2) 建库（只建一次）
+sudo -u postgres createdb shellpilot
+
+# 3) 服务单元
+sudo tee /etc/systemd/system/shellpilot.service >/dev/null <<'EOF'
+[Unit]
+Description=ShellPilot AI Remote Ops Assistant
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=shellpilot
+WorkingDirectory=/opt/shellpilot
+Environment=SHELLPILOT_PG_DSN=host=127.0.0.1 port=5432 dbname=shellpilot user=shellpilot_app password=CHANGE_ME
+ExecStart=/opt/shellpilot/.venv/bin/python server/app.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now shellpilot
+sudo systemctl status shellpilot
+journalctl -u shellpilot -f
+```
+
+Linux 下如果要监听局域网，同样改 `server/app.py` 的 `host`，或加 Nginx 反代。
+
+---
+
+## 7. 数据库运维
+
+### 7.1 表结构
+
+启动时自动创建（`server/session.py:25` 的 `SCHEMA`，由 `init_db()` 在 60 行执行）：
+
+- `sessions`：会话（`id / title / server_id / created_at / updated_at`）
+- `messages`：消息与命令审计（`session_id / seq / role / content / tool_call_id / name / arguments / result / exit_code / success / risk / ts / extra`）
+
+> 注意：`CREATE TABLE IF NOT EXISTS` **不会给已存在的表补新列**。如果以后升级版本改了表结构，需要手工 `ALTER TABLE` 或迁移（升级前先备份）。
+
+### 7.2 备份 / 恢复
+
+```bash
+# 备份（自定义格式，推荐）
+"C:/Program Files/PostgreSQL/18/bin/pg_dump.exe" -U postgres -h 127.0.0.1 -p 5432 \
+  -d shellpilot -F c -f "E:/backup/shellpilot_$(date +%Y%m%d_%H%M).dump"
+
+# 恢复（目标库需先存在）
+"C:/Program Files/PostgreSQL/18/bin/pg_restore.exe" -U postgres -h 127.0.0.1 -p 5432 \
+  -d shellpilot -c "E:/backup/shellpilot_20261123_1200.dump"
+```
+
+> 备份文件同样含命令输出与可能出现的敏感信息，按敏感数据管理。
+
+### 7.3 清理历史会话
+
+```bash
+python - <<'PY'
+import psycopg
+dsn = "host=127.0.0.1 port=5432 dbname=shellpilot user=postgres password=123456"
+with psycopg.connect(dsn) as c:
+    with c.cursor() as cur:
+        cur.execute("DELETE FROM sessions WHERE updated_at < now() - interval '180 days'")
+        print("deleted sessions:", cur.rowcount)
+PY
+```
+
+`messages` 通过外键 `ON DELETE CASCADE` 自动跟删。
+
+也可以在前端侧边栏逐个删除。
+
+---
+
+## 8. 测试
+
+### 8.1 单元测试（不连真实 LLM / 服务器）
+
+```bash
+python tests/test_agent_flow.py
+# ALL 5 TESTS PASSED
+```
+
+隔离方式：用 `tests/test_config.json` + 独立库 `shellpilot_test`，跑完自动清空测试库。
+第一次跑前先建测试库：
+
+```bash
+python - <<'PY'
+import psycopg
+with psycopg.connect("host=127.0.0.1 port=5432 dbname=postgres user=postgres password=123456", autocommit=True) as c:
+    with c.cursor() as cur:
+        cur.execute("SELECT 1 FROM pg_database WHERE datname='shellpilot_test'")
+        if not cur.fetchone():
+            cur.execute("CREATE DATABASE shellpilot_test")
+            print("created shellpilot_test")
+PY
+```
+
+### 8.2 集成测试（需要服务已在跑）
+
+```bash
+python server/app.py        # 终端 A
+python tests/test_integration.py   # 终端 B
+# ALL INTEGRATION TESTS PASSED
+```
+
+它会：
+
+- 起一个 Mock LLM（端口 8899）
+- 把**运行中服务的** `base_url` 临时指向 Mock，跑完恢复 `base_url / model / models / timeout`
+- **全程不读写真实 API Key**（不传 `api_key` 字段）
+- 自己创建的测试服务器与会话会在结束时删除
+
+⚠️ 若测试进程中途被杀，配置可能停留在 Mock 地址。恢复方法：在「设置」页重新保存一次正确 Base URL / 模型（密钥回显 `********` 会保持不变），或直接编辑 `config.json`。
+
+---
+
+## 9. 常见故障排查
+
+### 9.1 启动报 `Address already in use` / 端口被占
+
+```bash
+netstat -ano | grep ":8765.*LISTENING"
+taskkill //PID <PID> //F
+```
+
+### 9.2 启动报数据库连接失败
+
+报错形如 `connection failed ... database "shellpilot" does not exist` / 密码错误：
+
+1. 服务是否在跑：`sc query postgresql-x64-18`
+2. 库是否存在：第 2.2 节建库
+3. 连接串是否正确：检查 `SHELLPILOT_PG_DSN` 或 `server/session.py:20` 的默认值
+
+> 注：Windows 下 PostgreSQL 的中文报错直接打印可能乱码，看 `type` 与关键字即可（`does not exist` / `password`）。
+
+### 9.3 对话一直"模型未返回内容，请检查 LLM 配置或换个说法重试"
+
+按顺序排查：
+
+1. **设置** 页点「测试连接」——失败时看 HTTP 状态：
+   - `401`：Key 错/过期 → 重填
+   - `404`：Base URL 少了 `/v1` 或路径不对
+   - `503 model_not_found`：模型名不在网关支持列表 → 换模型
+2. 模型名是否与网关一致（如 `deepseek-v4.1-flash`、`kimi-k3`）
+3. `timeout` 是否太小（慢模型可调到 300）
+4. 网关是否要求特殊鉴权头（本工具只发 `Authorization: Bearer`）
+
+### 9.4 SSH 连接失败
+
+```text
+SSH 连接失败: ...
+```
+
+排查：主机可达（`ping`/`telnet <ip> 22`）、端口、用户名、密码/私钥格式（支持 Ed25519 / ECDSA / RSA，PEM 或 OpenSSH 格式）。
+主机指纹策略是 `AutoAddPolicy`（自动接受新主机，方便但有中间人风险，敏感环境建议改成固定 known_hosts）。
+
+### 9.5 页面打不开 / 样式丢失 / 404
+
+`server/app.py:15` 依赖项目目录结构（`web/` 与 `server/` 同级）。不要把 `web/` 移走或只复制 `server/` 目录。
+若是反向代理，确认 `/css/`、`/js/`、`/ws` 都没被拦截。
+
+### 9.6 WebSocket 反复"连接断开，重连中…"
+
+前端地址是自动推导的 `ws://<当前host>/ws`。经过反代时必须透传 `Upgrade`/`Connection` 头（见 4.3），并放宽读超时。
+
+### 9.7 危险命令没弹确认 / 只读命令却要确认
+
+安全分级在 `server/safety.py`，规则白名单制：**不在白名单的未知命令一律按危险处理**。
+需要放行某类只读命令就往白名单加正则；先跑单元测试确认没误判。
+
+---
+
+## 10. 升级 / 更新流程
+
+1. 备份：`config.json` + 数据库（见 7.2）
+2. 拉取/覆盖代码（保持 `web/`、`server/`、`tests/` 目录结构）
+3. 更新依赖：`pip install -r requirements.txt`
+4. 若有表结构变更：按变更说明执行 `ALTER TABLE`
+5. 重启服务（第 5.3 节）
+6. 验证：`/api/health`、设置页「测试连接」、发一条只读排查消息
+
+回滚：恢复备份代码 + `config.json` + 数据库 dump，重启。
+
+---
+
+## 11. 安全检查清单
+
+- [ ] `config.json` 不入库、不外传，权限仅限服务账号可读
+- [ ] 服务只监听 `127.0.0.1`；公网访问必须走反代 + HTTPS + 鉴权
+- [ ] 数据库使用专用账号（非 `postgres` 超级用户）并限制来源
+- [ ] SSH 使用最小权限账号（不建议 root），敏感环境启用固定 known_hosts
+- [ ] 危险操作确认机制保持开启（默认 300 秒超时自动取消）
+- [ ] 定期清理/归档历史会话；备份文件按敏感数据保管
+- [ ] 变更前先备份 `config.json` 与数据库
+
+---
+
+## 附：目录与关键文件速查
+
+```
+E:\shellpilot\
+├── server\app.py            # 入口（host/port 硬编码在此，42-43 行）
+├── server\routes.py         # REST + WebSocket（/ws 入口）
+├── server\agent.py          # ReAct 循环（MAX_ITERATIONS=15, CMD_TIMEOUT=30）
+├── server\safety.py         # 命令风险分级
+├── server\ssh_manager.py    # SSH 连接池
+├── server\llm_client.py     # LLM 调用（模型选择在此生效）
+├── server\config.py         # config.json 读写（模型列表、密钥三态）
+├── server\session.py        # PostgreSQL 表结构与读写（DSN 在 20 行）
+├── web\                     # 前端静态资源（不可分离）
+├── tests\test_agent_flow.py # 单元测试（独立库 shellpilot_test）
+├── tests\test_integration.py# 集成测试（需服务在跑）
+├── config.json              # 运行时生成，含密钥
+└── requirements.txt
+```

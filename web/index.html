@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ShellPilot · 远程服务器运维助手</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <span class="brand-name">ShellPilot</span>
+  </div>
+  <nav class="tabs">
+    <button class="tab active" data-view="chat">对话</button>
+    <button class="tab" data-view="servers">服务器管理</button>
+    <button class="tab" data-view="settings">设置</button>
+  </nav>
+  <div class="topbar-right">
+    <button class="icon-btn" id="btn-theme" title="切换明暗主题">☀️</button>
+    <span id="status-dot" class="status-dot" title="WebSocket 状态"></span>
+    <span id="status-text" class="status-text">未连接</span>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- 侧边栏 -->
+  <aside class="sidebar" id="sidebar">
+    <button class="btn btn-primary btn-block" id="btn-new-session">+ 新建会话</button>
+    <div class="sidebar-title">历史会话</div>
+    <ul class="session-list" id="session-list"></ul>
+  </aside>
+
+  <!-- 对话视图 -->
+  <section class="view active" id="view-chat">
+    <div class="chat-scroll" id="chat-scroll">
+      <div class="welcome" id="welcome">
+        <h1>ShellPilot</h1>
+        <p>用自然语言描述服务器问题，我会连接服务器自主排查、按需操作。</p>
+        <div class="examples">
+          <div class="example-card" data-text="帮我检查一下 nginx 服务为什么启动不了">帮我检查一下 nginx 服务为什么启动不了</div>
+          <div class="example-card" data-text="服务器磁盘快满了，帮我看看哪些目录占用最大">服务器磁盘快满了，帮我看看哪些目录占用最大</div>
+          <div class="example-card" data-text="检查 8080 端口被哪个进程占用了">检查 8080 端口被哪个进程占用了</div>
+          <div class="example-card" data-text="最近系统负载很高，帮我排查一下原因">最近系统负载很高，帮我排查一下原因</div>
+        </div>
+      </div>
+      <div class="messages" id="messages"></div>
+    </div>
+    <div class="composer">
+      <div class="composer-toolbar">
+        <label class="server-picker">
+          目标服务器：
+          <select id="chat-server-select"><option value="">自动 / 按会话</option></select>
+        </label>
+        <label class="server-picker">
+          使用模型：
+          <select id="chat-model-select"><option value="">加载中…</option></select>
+        </label>
+        <span class="hint">只读命令自动执行 · 危险操作需确认</span>
+      </div>
+      <div class="composer-input">
+        <textarea id="chat-input" rows="1" placeholder="描述你的问题，例如：帮我看看 nginx 为什么挂了…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <button class="btn btn-primary" id="btn-send">发送</button>
+        <button class="btn btn-danger hidden" id="btn-stop">停止</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 服务器管理视图 -->
+  <section class="view" id="view-servers">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>服务器管理</h2>
+        <button class="btn btn-primary" id="btn-add-server">+ 添加服务器</button>
+      </div>
+      <div id="server-list" class="server-grid"></div>
+    </div>
+  </section>
+
+  <!-- 设置视图 -->
+  <section class="view" id="view-settings">
+    <div class="panel">
+      <div class="panel-head"><h2>LLM 设置</h2></div>
+      <form id="llm-form" class="form">
+        <div class="field">
+          <label>API Base URL</label>
+          <input type="text" name="base_url" placeholder="例如 https://api.deepseek.com/v1">
+          <div class="field-hint">兼容 OpenAI Chat Completions 协议，须包含 /v1（或你的网关路径）</div>
+        </div>
+        <div class="field">
+          <label>API Key</label>
+          <input type="password" name="api_key" placeholder="sk-...">
+          <div class="field-hint">留空或保持 ******** 表示不修改已保存的密钥</div>
+        </div>
+        <div class="field">
+          <label>模型名称（默认）</label>
+          <input type="text" name="model" placeholder="deepseek-chat">
+          <div class="field-hint">下方列表中的第一个模型会作为默认；此处配置的是兜底模型名</div>
+        </div>
+        <div class="field">
+          <label>可选模型列表（每行一个）</label>
+          <textarea name="models" rows="4" placeholder="deepseek-v4.1-flash&#10;kimi-k3"></textarea>
+          <div class="field-hint">在对话输入框上方的「使用模型」下拉框中选择；留空则只显示默认模型</div>
+        </div>
+        <div class="field">
+          <label>超时时间（秒）</label>
+          <input type="number" name="timeout" min="10" max="600">
+        </div>
+        <div class="field">
+          <label>历史上下文上限（字符）</label>
+          <input type="number" name="history_budget_chars" min="0" value="0">
+          <div class="field-hint">0 = 不裁剪，每轮把该会话全部历史发给模型（大上下文模型推荐）。填正数则超出后按整轮丢弃最旧内容</div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">保存</button>
+          <button type="button" class="btn" id="btn-test-llm">测试连接</button>
+          <span id="llm-result" class="result-text"></span>
+        </div>
+      </form>
+    </div>
+  </section>
+</main>
+
+<!-- 服务器编辑弹窗 -->
+<div class="modal-mask hidden" id="server-modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="server-modal-title">添加服务器</h3>
+      <button class="icon-btn" id="btn-close-server-modal">✕</button>
+    </div>
+    <form id="server-form" class="form">
+      <input type="hidden" name="id">
+      <div class="field">
+        <label>名称</label>
+        <input type="text" name="name" required placeholder="例如：生产 Web 服务器">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>主机 IP / 域名</label>
+          <input type="text" name="host" required placeholder="192.168.1.10">
+        </div>
+        <div class="field small">
+          <label>SSH 端口</label>
+          <input type="number" name="port" value="22" min="1" max="65535">
+        </div>
+      </div>
+      <div class="field">
+        <label>用户名</label>
+        <input type="text" name="username" required placeholder="root">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>认证方式</label>
+          <select name="auth_type" id="auth-type">
+            <option value="password">密码</option>
+            <option value="key">私钥</option>
+          </select>
+        </div>
+      </div>
+      <div class="field" id="field-password">
+        <label>密码</label>
+        <input type="password" name="password" placeholder="留空或 ******** 表示不修改">
+      </div>
+      <div class="hidden" id="field-key">
+        <div class="field">
+          <label>私钥内容</label>
+          <textarea name="key_content" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..."></textarea>
+          <div class="field-hint">粘贴私钥内容，或填写下方路径（二选一）</div>
+        </div>
+        <div class="field">
+          <label>私钥路径（服务端本机路径）</label>
+          <input type="text" name="key_path" placeholder="C:\Users\you\.ssh\id_rsa">
+        </div>
+        <div class="field">
+          <label>私钥口令（可选）</label>
+          <input type="password" name="passphrase" placeholder="留空或 ******** 表示不修改">
+        </div>
+      </div>
+      <div class="field">
+        <label>备注（可选）</label>
+        <input type="text" name="note" placeholder="例如：负责前端静态资源">
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">保存</button>
+        <button type="button" class="btn" id="btn-test-server-form">测试连接</button>
+        <span id="server-form-result" class="result-text"></span>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="/js/app.js"></script>
+<script src="/js/chat.js"></script>
+<script src="/js/servers.js"></script>
+<script src="/js/settings.js"></script>
+<script>
+  App.init();
+</script>
+</body>
+</html>

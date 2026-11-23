@@ -1,0 +1,40 @@
+# 密钥与本地配置（务必不要提交）
+config.json
+config.local.json
+.env
+*.pem
+*.key
+id_rsa*
+
+# 测试产物
+tests/test_config.json
+tests/test_sessions/
+
+# 运行时产物
+server/sessions/*.json
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# 日志
+*.log
+server.out.log
+server.err.log
+
+# 编辑器 / IDE
+.idea/
+.vscode/
+*.iml
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 虚拟环境
+.venv/
+venv/
+env/
