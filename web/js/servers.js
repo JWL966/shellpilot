@@ -41,6 +41,7 @@ const Servers = {
         <div class="s-actions">
           <button class="btn btn-sm" data-act="test">测试连接</button>
           <button class="btn btn-sm" data-act="edit">编辑</button>
+          <button class="btn btn-sm btn-ghost" data-act="hostkey" title="服务器重装系统后，删除旧的 SSH 主机指纹以便重新记录">重置指纹</button>
           <button class="btn btn-sm btn-ghost" data-act="del" style="color:#f85149">删除</button>
         </div>
       `;
@@ -51,6 +52,7 @@ const Servers = {
 
       card.querySelector('[data-act="test"]').addEventListener('click', (e) => this.test(s.id, e.target));
       card.querySelector('[data-act="edit"]').addEventListener('click', () => this.openModal(s));
+      card.querySelector('[data-act="hostkey"]').addEventListener('click', () => this.resetHostKey(s));
       card.querySelector('[data-act="del"]').addEventListener('click', () => this.remove(s));
 
       grid.appendChild(card);
@@ -216,6 +218,18 @@ const Servers = {
       alert('测试失败: ' + e.message);
     } finally {
       setTimeout(() => { btn.textContent = old; btn.disabled = false; btn.style.color = ''; }, 2500);
+    }
+  },
+
+  async resetHostKey(server) {
+    const name = server.name || server.host;
+    if (!confirm(`确定重置「${name}」的 SSH 主机指纹？\n\n仅在服务器确实重装过系统时重置；若你没有重装过，指纹变化可能是中间人攻击，请先核实网络环境。`)) return;
+    try {
+      const resp = await fetch(`/api/servers/${server.id}/hostkey`, { method: 'DELETE' });
+      const json = await resp.json();
+      alert(json.message || json.error || (json.success ? '已重置' : '操作失败'));
+    } catch (e) {
+      alert('操作失败: ' + e.message);
     }
   },
 

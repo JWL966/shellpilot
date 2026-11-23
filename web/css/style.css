@@ -247,6 +247,10 @@ html[data-theme="light"] .confirm-cmd { color: #7d4e00; }
 .result-text { font-size: 12.5px; }
 .result-text.ok { color: var(--green); }
 .result-text.err { color: var(--red); }
+.llm-warnings { font-size: 12.5px; color: #d29922; background: rgba(210, 153, 34, .1);
+  border: 1px solid rgba(210, 153, 34, .35); border-radius: 8px; padding: 9px 13px; margin-bottom: 14px; }
+.llm-warnings.hidden { display: none; }
+.llm-warnings div { margin: 2px 0; }
 
 .server-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 14px; }
 .server-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px;

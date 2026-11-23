@@ -49,7 +49,16 @@ cp config.example.json config.json   # Windows: copy config.example.json config.
 python server/app.py
 ```
 
-Then open http://127.0.0.1:8765
+The startup log prints the server address; **the first start creates an admin account automatically** (the password is stored hashed; the plaintext is printed only this once):
+
+```
+ShellPilot 启动: http://127.0.0.1:8765
+首次启动已生成管理员账号（密码只加密存储，明文仅此一次，请妥善保存）:
+  用户名: admin
+  密码:   xxxxxxxxxxxxxxxx
+```
+
+Open http://127.0.0.1:8765 in a browser and sign in with those credentials. Forgot the password? Run `python server/app.py --reset-password` on the server (the old password and all sessions are invalidated immediately). You can change the password in **Settings → 账号安全** after logging in.
 
 > Detailed setup, background/service running, stop & restart, backup and troubleshooting: [DEPLOY.md](DEPLOY.md) (Chinese).
 
@@ -57,18 +66,19 @@ Then open http://127.0.0.1:8765
 2. **Servers** → add a Linux host → **Test connection** to confirm SSH is reachable
 3. **Chat** → pick the target server and model at the top → describe your problem
 
-> The server listens on `127.0.0.1:8765` only. For remote access, put it behind a reverse proxy with HTTPS and authentication.
+> The server listens on `127.0.0.1:8765` only. Every endpoint (API, WebSocket, static assets) requires an authenticated session. For remote access, put it behind a reverse proxy with HTTPS and review the auth/Origin behavior described under "Security notes".
 
 ## Project layout
 
 ```
 shellpilot/
 ├── server/                 # backend (Python + aiohttp + paramiko)
-│   ├── app.py              # entry point: app wiring, static files, startup
+│   ├── app.py              # entry point: app wiring, access control, static files, startup
+│   ├── auth.py             # login auth + session management + Origin/Host validation (CSWSH/CSRF/DNS-rebinding)
 │   ├── routes.py           # REST API + WebSocket routes
 │   ├── agent.py            # ReAct loop, tool definitions and dispatch
 │   ├── safety.py           # command risk classification (allow / deny / forbid)
-│   ├── ssh_manager.py      # SSH connection pool and command execution
+│   ├── ssh_manager.py      # SSH connection pool, command execution, host-key pinning (TOFU)
 │   ├── llm_client.py       # streaming LLM client (OpenAI protocol)
 │   ├── config.py           # config.json read/write
 │   └── session.py          # PostgreSQL session and audit-log storage
@@ -78,6 +88,7 @@ shellpilot/
 │   └── js/{app,chat,servers,settings}.js
 ├── tests/                  # tests
 │   ├── test_agent_flow.py  # agent loop and safety policy (mock LLM/SSH, no real env needed)
+│   ├── test_auth.py        # auth & access control (spins up an isolated app; needs local PostgreSQL)
 │   └── test_integration.py # end-to-end (requires a running app.py)
 ├── DEPLOY.md              # setup / deployment / operations guide (Chinese)
 ├── config.example.json     # template — copy to config.json
@@ -97,10 +108,13 @@ shellpilot/
 | `llm.models` | selectable models shown in the chat dropdown | `[]` |
 | `llm.timeout` | request timeout in seconds | `120` |
 | `llm.history_budget_chars` | max characters of history replayed to the model; `0` = send everything | `0` |
+| `auth.username` | login username | `admin` |
+| `auth.password_hash` | PBKDF2 hash of the login password; empty = a random password is generated and printed on first start | auto |
+| `ssh.host_key_policy` | SSH host-key policy: `tofu` (pin on first connect, reject on change) / `strict` / `auto` (no check) | `tofu` |
 
 > Agent internals such as temperature, max_tokens and iteration count are constants in `server/agent.py` and `server/llm_client.py`, not settings. Saving an empty or `********` API key leaves the stored key unchanged.
 
-Environment variables: `SHELLPILOT_CONFIG` (config file path) and `SHELLPILOT_PG_DSN` (PostgreSQL DSN, default `host=127.0.0.1 port=5432 dbname=shellpilot user=postgres password=123456`). The legacy names `YCAI_CONFIG` / `YCAI_PG_DSN` are still accepted.
+Environment variables: `SHELLPILOT_CONFIG` (config file path), `SHELLPILOT_PG_DSN` (PostgreSQL DSN, default `host=127.0.0.1 port=5432 dbname=shellpilot user=postgres password=123456`), `SHELLPILOT_PASSWORD` (provide the login password via env; not written to disk, takes precedence over the stored hash), `SHELLPILOT_KNOWN_HOSTS` (SSH known-hosts path, default `~/.shellpilot/known_hosts`), `SHELLPILOT_HOST_KEY_POLICY` (override the host-key policy). The legacy names `YCAI_CONFIG` / `YCAI_PG_DSN` are still accepted.
 
 ## Database
 
@@ -130,13 +144,31 @@ The high-level tools reduce the chance of the model composing a broken command; 
 # unit tests (mock LLM + mock SSH, no real servers)
 python tests/test_agent_flow.py
 
-# integration tests (mock LLM HTTP server; start `python server/app.py` first)
-python tests/test_integration.py
+# auth & access control (isolated app + test database, never touches real config)
+python tests/test_auth.py
+
+# integration tests (mock LLM HTTP server; start the app and the test with the
+# same SHELLPILOT_PASSWORD)
+SHELLPILOT_PASSWORD=test1234 python server/app.py
+SHELLPILOT_PASSWORD=test1234 python tests/test_integration.py
 ```
 
 > The integration test temporarily points the LLM at a mock server and restores the original base URL/model/timeout afterwards. It never reads or modifies your real API key. Back up `config.json` first anyway.
 
 ## Security notes
+
+**Authentication & access control** (`server/auth.py`):
+
+- **Login auth**: the first start creates an admin account (`auth.username`, default `admin`) with a random password stored as a PBKDF2 hash — the plaintext is printed exactly once. Every API call, WebSocket handshake and static asset requires an authenticated session; only `/api/health` and the login page are open (neither returns sensitive data)
+- **Sessions**: login sets an HttpOnly + SameSite=Strict session cookie (30-day sliding expiry); scripts can use `Authorization: Bearer <session token>` instead. Logout invalidates the session immediately; changing the password drops all other sessions
+- **CSWSH protection**: WebSocket handshakes carrying an `Origin` must be same-origin — a malicious web page can no longer hijack your browser's connection to the local WS and run commands through the agent
+- **CSRF protection**: state-changing requests (POST/PUT/DELETE, including the login endpoint itself) carrying an `Origin` must be same-origin, blocking cross-site "simple requests"
+- **DNS-rebinding protection**: the `Host` header must be a loopback address, `localhost` or an IP literal — attacker domains resolving to 127.0.0.1 are rejected. LAN hostnames can be allow-listed via `SHELLPILOT_ALLOWED_HOSTS` (comma-separated); reverse-proxy origins via `SHELLPILOT_ALLOWED_ORIGINS`
+- **Brute-force mitigation**: failed logins are delayed by a fixed 1 second; passwords are hashed with PBKDF2-SHA256 (200k iterations)
+- **Secret-entry validation**: saving the LLM config rejects base URLs with embedded credentials or invalid schemes; plaintext-HTTP public gateways are allowed but flagged with a warning
+- **Host-key TOFU**: the first SSH connection pins the host key to `~/.shellpilot/known_hosts`; any later mismatch is rejected (protects passwords from MITM). If the server was genuinely reinstalled, reset its fingerprint from the **Servers** page
+
+**Other**:
 
 - SSH passwords / keys and the LLM key are stored only server-side in `config.json`; API responses mask them
 - Confirming a dangerous command times out after 300 seconds and cancels itself

@@ -1,15 +1,52 @@
-"""SSH 连接管理：paramiko 封装，连接复用、命令执行。"""
+"""SSH 连接管理：paramiko 封装，连接复用、命令执行、主机指纹校验（TOFU）。"""
+import os
 import threading
 import time
 from typing import Any, Optional
 
 import paramiko
 
+import config
 from config import get_server_raw
-
 
 class SSHError(Exception):
     pass
+
+
+# TOFU 指纹库路径：环境变量 SHELLPILOT_KNOWN_HOSTS 可覆盖，默认 ~/.shellpilot/known_hosts
+KNOWN_HOSTS_PATH = os.environ.get(
+    "SHELLPILOT_KNOWN_HOSTS",
+    os.path.join(os.path.expanduser("~"), ".shellpilot", "known_hosts"),
+)
+
+_kh_lock = threading.Lock()  # 指纹库专用锁（与连接池锁分开，避免嵌套持锁）
+
+
+def _hostkey_entry(host: str, port: int) -> str:
+    """paramiko 的 known_hosts 条目名：22 端口用裸主机名，其余用 [host]:port。"""
+    return host if int(port or 22) == 22 else f"[{host}]:{int(port)}"
+
+
+class _TofuPolicy(paramiko.MissingHostKeyPolicy):
+    """首次连接记录主机指纹到本地指纹库；之后由 paramiko 对照校验，
+    指纹不一致会在 connect 阶段抛 BadHostKeyException。"""
+
+    def __init__(self, path: str, port: int):
+        self._path = path
+        self._port = int(port or 22)
+
+    def missing_host_key(self, client, hostname, key):
+        entry = _hostkey_entry(hostname, self._port)
+        with _kh_lock:
+            keys = paramiko.HostKeys()
+            if os.path.exists(self._path):
+                try:
+                    keys.load(self._path)
+                except Exception:
+                    pass  # 指纹库损坏时按空库处理，重新记录
+            keys.add(entry, key.get_name(), key)
+            os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
+            keys.save(self._path)
 
 
 class SSHManager:
@@ -21,10 +58,23 @@ class SSHManager:
 
     def _connect(self, server: dict[str, Any]) -> paramiko.SSHClient:
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        port = int(server.get("port", 22))
+        # 预加载本地指纹库（TOFU 的 O：已记录的指纹在这里比对）
+        if os.path.exists(KNOWN_HOSTS_PATH):
+            try:
+                client.load_host_keys(KNOWN_HOSTS_PATH)
+            except Exception:
+                pass
+        policy = config.get_host_key_policy()
+        if policy == "auto":
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        elif policy == "strict":
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        else:  # tofu（默认）
+            client.set_missing_host_key_policy(_TofuPolicy(KNOWN_HOSTS_PATH, port))
         kwargs: dict[str, Any] = {
             "hostname": server["host"],
-            "port": int(server.get("port", 22)),
+            "port": port,
             "username": server["username"],
             "timeout": 10,
         }
@@ -43,6 +93,12 @@ class SSHManager:
                 pkey = self._load_pkey(open(key_path, "r", encoding="utf-8"), passphrase)
                 kwargs["pkey"] = pkey
             client.connect(**kwargs)
+        except paramiko.BadHostKeyException as e:
+            raise SSHError(
+                f"主机 {e.hostname} 的指纹与首次记录不一致，连接已拒绝（可能被中间人劫持，"
+                f"或对方重装过系统）。确认无误后可在「服务器管理」里重置该主机指纹，"
+                f"或删除文件 {KNOWN_HOSTS_PATH} 中对应条目后重试。"
+            ) from e
         except Exception as e:
             raise SSHError(f"SSH 连接失败: {e}") from e
         return client
@@ -130,6 +186,23 @@ class SSHManager:
                 client.close()
             except Exception:
                 pass
+
+    def forget_host_key(self, host: str, port: int = 22) -> bool:
+        """删除某主机的已记录指纹（对方重装系统后用户主动重置用）。"""
+        if not os.path.exists(KNOWN_HOSTS_PATH):
+            return False
+        entry = _hostkey_entry(host, port)
+        with _kh_lock:
+            keys = paramiko.HostKeys()
+            try:
+                keys.load(KNOWN_HOSTS_PATH)
+            except Exception:
+                return False
+            if keys.lookup(entry) is None:
+                return False
+            del keys[entry]
+            keys.save(KNOWN_HOSTS_PATH)
+        return True
 
 
 ssh_manager = SSHManager()

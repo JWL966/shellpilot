@@ -1,10 +1,14 @@
 """端到端集成测试：Mock LLM HTTP 服务 + 真实 aiohttp 应用 + WebSocket 客户端。
 
-覆盖：流式 tool_call 解析、危险命令确认（拒绝/同意）、事件序列、SSH 失败降级。
-运行：python tests/test_integration.py   （需先启动 server/app.py）
+覆盖：登录认证、流式 tool_call 解析、危险命令确认（拒绝/同意）、事件序列、
+SSH 失败降级、Origin 校验。
+运行（先设登录密码并启动服务）：
+  SHELLPILOT_PASSWORD=test1234 python server/app.py
+  SHELLPILOT_PASSWORD=test1234 python tests/test_integration.py
 """
 import asyncio
 import json
+import os
 import sys
 
 import aiohttp
@@ -12,6 +16,36 @@ from aiohttp import web
 
 MOCK_PORT = 8899
 APP = "http://127.0.0.1:8765"
+ORIGIN = APP  # 同源 Origin
+USERNAME = "admin"
+
+
+def _load_password() -> str:
+    return os.environ.get("SHELLPILOT_PASSWORD", "").strip()
+
+
+PASSWORD = _load_password()
+
+
+async def login(s: aiohttp.ClientSession) -> bool:
+    """用环境变量里的密码登录，Cookie 存入该 session 的 jar。"""
+    if not PASSWORD:
+        return False
+    async with s.post(f"{APP}/api/login",
+                      headers={"Origin": ORIGIN},
+                      json={"username": USERNAME, "password": PASSWORD}) as r:
+        return r.status == 200
+
+
+def new_session() -> aiohttp.ClientSession:
+    """测试专用会话：目标地址是 IP，需 unsafe CookieJar 才会保存 Cookie
+    （aiohttp 客户端默认拒收 IP host 的 Cookie；真实浏览器不受此影响）。"""
+    return aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
+
+
+def check(name, cond, detail=""):
+    print(f"{'PASS' if cond else 'FAIL'}: {name}" + (f"   [{detail}]" if detail and not cond else ""))
+    return cond
 
 # Mock LLM 状态：每轮返回什么
 MOCK_STATE = {"turn": 0, "scenario": "dangerous_reject"}
@@ -53,8 +87,11 @@ class MockState:
 async def run_scenario(approve: bool, server_id: str = None):
     """连接 WebSocket，发消息，处理确认，收集事件序列。"""
     events = []
-    async with aiohttp.ClientSession() as s:
-        async with s.ws_connect(f"{APP}/ws") as ws:
+    async with new_session() as s:
+        if not await login(s):
+            print("登录失败：请以 SHELLPILOT_PASSWORD=<密码> 同时启动服务与本测试")
+            return events
+        async with s.ws_connect(f"{APP}/ws", headers={"Origin": ORIGIN}) as ws:
             await ws.send_json({"type": "user_message", "content": "重启 nginx 排查",
                                 "session_id": None, "server_id": server_id})
             confirmed = False
@@ -70,12 +107,13 @@ async def run_scenario(approve: bool, server_id: str = None):
     return events
 
 
-def check(name, cond, detail=""):
-    print(f"{'PASS' if cond else 'FAIL'}: {name}" + (f"   [{detail}]" if detail and not cond else ""))
-    return cond
-
-
 async def main():
+    if not PASSWORD:
+        print("请设置 SHELLPILOT_PASSWORD 环境变量（与启动服务时一致），例如：")
+        print("  SHELLPILOT_PASSWORD=test1234 python server/app.py")
+        print("  SHELLPILOT_PASSWORD=test1234 python tests/test_integration.py")
+        return 2
+
     # 1. 启动 mock LLM
     app = web.Application()
     app.router.add_post("/v1/chat/completions", mock_chat)
@@ -85,8 +123,34 @@ async def main():
     await site.start()
 
     try:
+        # 0. 鉴权检查：未登录 / 跨站请求必须被拒绝
+        auth_ok = True
+        async with new_session() as s:
+            async with s.get(f"{APP}/api/sessions") as r:
+                auth_ok &= check("鉴权: 未登录访问 API -> 401", r.status == 401, str(r.status))
+            async with s.post(f"{APP}/api/servers", headers={"Origin": "http://evil.example"},
+                              json={"name": "x", "host": "1.2.3.4", "username": "root"}) as r:
+                auth_ok &= check("鉴权: 跨站 POST -> 403", r.status == 403, str(r.status))
+            try:
+                async with s.ws_connect(f"{APP}/ws",
+                                        headers={"Origin": "http://evil.example"}) as ws:
+                    await ws.close()
+                    auth_ok &= check("鉴权: 跨站 WS -> 拒绝", False, "握手竟然成功")
+            except aiohttp.WSServerHandshakeError as e:
+                auth_ok &= check("鉴权: 跨站 WS -> 拒绝", e.status == 403, str(e.status))
+        if not auth_ok:
+            print("鉴权检查未通过，跳过后续场景")
+            return 1
+
+        # 登录一次验证凭据可用
+        async with new_session() as s:
+            if not await login(s):
+                print("登录失败：SHELLPILOT_PASSWORD 与服务不一致？")
+                return 1
+
         # 备份现有配置与会话，测试结束后恢复
-        async with aiohttp.ClientSession() as s:
+        async with new_session() as s:
+            await login(s)
             async with s.get(f"{APP}/api/config/llm") as r:
                 original_llm = (await r.json())["llm"]
             async with s.get(f"{APP}/api/servers") as r:
@@ -94,7 +158,10 @@ async def main():
             async with s.get(f"{APP}/api/sessions") as r:
                 original_sessions = {x["id"] for x in (await r.json())["sessions"]}
 
-        async with aiohttp.ClientSession() as s:
+        async with new_session() as s:
+            if not await login(s):
+                print("登录失败：SHELLPILOT_PASSWORD 与服务不一致？")
+                return 1
             # 2. 配置 LLM 指向 mock
             # 不传 api_key：保留运行中的真实密钥，仅把 base_url 指向 mock
             async with s.put(f"{APP}/api/config/llm", json={
@@ -139,12 +206,14 @@ async def main():
         ok2 &= check("B: 有 agent_done", "agent_done" in kinds2)
 
         print()
-        print("ALL INTEGRATION TESTS PASSED" if (ev_a and ok2) else "SOME TESTS FAILED")
-        return 0 if (ev_a and ok2) else 1
+        all_ok = ev_a and ok2 and auth_ok
+        print("ALL INTEGRATION TESTS PASSED" if all_ok else "SOME TESTS FAILED")
+        return 0 if all_ok else 1
     finally:
         # 恢复原配置：删除测试服务器、还原 LLM 设置、删除测试会话
         try:
-            async with aiohttp.ClientSession() as s:
+            async with new_session() as s:
+                await login(s)
                 async with s.get(f"{APP}/api/servers") as r:
                     now_servers = (await r.json())["servers"]
                 known = {x["id"] for x in original_servers}

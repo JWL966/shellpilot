@@ -45,7 +45,16 @@ cp config.example.json config.json   # Windows: copy config.example.json config.
 python server/app.py
 ```
 
-浏览器打开 http://127.0.0.1:8765
+启动日志会打印服务地址；**首次启动会自动生成管理员账号**（密码只加密存储，明文仅打印这一次）：
+
+```
+ShellPilot 启动: http://127.0.0.1:8765
+首次启动已生成管理员账号（密码只加密存储，明文仅此一次，请妥善保存）:
+  用户名: admin
+  密码:   xxxxxxxxxxxxxxxx
+```
+
+浏览器打开 http://127.0.0.1:8765 ，用上面的账号登录。忘记密码可在服务端执行 `python server/app.py --reset-password` 重置（旧密码与所有登录会话立即失效）。登录后可在 **设置 → 账号安全** 里修改密码。
 
 > 完整的环境准备、数据库建库、后台常驻、停止/重启、备份恢复与故障排查，见 [DEPLOY.md](DEPLOY.md)。
 
@@ -53,18 +62,19 @@ python server/app.py
 2. 进入 **服务器管理** → 添加 Linux 服务器 → 点「测试连接」确认 SSH 可达
 3. 回到 **对话** → 顶部选择目标服务器与使用模型 → 描述你的问题
 
-> 服务默认仅监听 `127.0.0.1:8765`，不对外网开放。如需远程访问，请自行加反向代理 + HTTPS + 鉴权。
+> 服务默认仅监听 `127.0.0.1:8765`，不对外网开放；所有接口（含 WebSocket 与静态资源）都要求登录认证。如需远程访问，请自行加反向代理 + HTTPS，并了解认证与 Origin 校验的行为（见下文「安全说明」）。
 
 ## 目录结构
 
 ```
 shellpilot/
 ├── server/                 # 后端（Python + aiohttp + paramiko）
-│   ├── app.py              # 入口：应用装配、静态文件、启动
+│   ├── app.py              # 入口：应用装配、访问控制、静态文件、启动
+│   ├── auth.py             # 登录认证 + 会话管理 + Origin/Host 校验（防 CSWSH/CSRF/DNS rebinding）
 │   ├── routes.py           # REST API + WebSocket 路由
 │   ├── agent.py            # ReAct Agent 循环、工具定义与调度
 │   ├── safety.py           # 命令安全分级（白名单/黑名单/绝对禁止）
-│   ├── ssh_manager.py      # SSH 连接池与命令执行
+│   ├── ssh_manager.py      # SSH 连接池、命令执行、主机指纹校验（TOFU）
 │   ├── llm_client.py       # LLM 流式调用（OpenAI 协议）
 │   ├── config.py           # 配置读写（config.json）
 │   └── session.py          # PostgreSQL 会话与审计日志存储
@@ -74,6 +84,7 @@ shellpilot/
 │   └── js/{app,chat,servers,settings}.js
 ├── tests/                  # 测试
 │   ├── test_agent_flow.py  # Agent 循环与安全策略（Mock LLM/SSH，无需真实环境）
+│   ├── test_auth.py        # 鉴权与访问控制（自起隔离服务，需本机 PostgreSQL）
 │   └── test_integration.py # 端到端（需先启动 app.py）
 ├── DEPLOY.md              # 启动 / 部署 / 运维手册
 ├── config.json             # 运行时生成（含密钥，勿提交）
@@ -92,10 +103,13 @@ shellpilot/
 | `llm.models` | 可选模型列表；对话页下拉框据此切换 | `[]` |
 | `llm.timeout` | 请求超时秒 | `120` |
 | `llm.history_budget_chars` | 回灌模型的历史字符上限，`0` = 全量发送 | `0` |
+| `auth.username` | 登录用户名 | `admin` |
+| `auth.password_hash` | 登录密码的 PBKDF2 哈希；留空则首次启动生成随机密码并打印 | 自动生成 |
+| `ssh.host_key_policy` | SSH 主机指纹校验：`tofu`（首次记录，变更拒绝）/ `strict` / `auto`（不校验） | `tofu` |
 
 > 温度、max_tokens、迭代轮次等 Agent 内部参数已固化为代码常量（`server/agent.py`、`server/llm_client.py`），不作为配置暴露。API Key 留空或 `********` 保存表示不修改原密钥。
 
-可用环境变量 `SHELLPILOT_CONFIG` 指定配置文件路径；`SHELLPILOT_PG_DSN` 指定 PostgreSQL 连接串（默认 `host=127.0.0.1 port=5432 dbname=shellpilot user=postgres password=123456`）。旧变量名 `YCAI_CONFIG` / `YCAI_PG_DSN` 仍然兼容。
+可用环境变量 `SHELLPILOT_CONFIG` 指定配置文件路径；`SHELLPILOT_PG_DSN` 指定 PostgreSQL 连接串（默认 `host=127.0.0.1 port=5432 dbname=shellpilot user=postgres password=123456`）；`SHELLPILOT_PASSWORD` 用环境变量提供登录密码（不落盘，优先于配置里的哈希）；`SHELLPILOT_KNOWN_HOSTS` 指定 SSH 指纹库路径（默认 `~/.shellpilot/known_hosts`）；`SHELLPILOT_HOST_KEY_POLICY` 覆盖指纹校验策略。旧变量名 `YCAI_CONFIG` / `YCAI_PG_DSN` 仍然兼容。
 
 ## 数据库
 
@@ -125,13 +139,30 @@ shellpilot/
 # 单元测试（Mock LLM + Mock SSH，不连真实服务器）
 python tests/test_agent_flow.py
 
-# 集成测试（Mock LLM HTTP 服务；需先启动 python server/app.py）
-python tests/test_integration.py
+# 鉴权与访问控制（自起隔离服务 + 测试数据库，不碰真实配置）
+python tests/test_auth.py
+
+# 集成测试（Mock LLM HTTP 服务；先以 SHELLPILOT_PASSWORD=test1234 启动 app.py，
+# 再以同名环境变量运行本测试）
+SHELLPILOT_PASSWORD=test1234 python tests/test_integration.py
 ```
 
 > 集成测试会临时把 LLM 指向 Mock 服务、结束后恢复原 Base URL/模型/超时；全程不读取、不修改真实 API Key。测试前仍建议备份 `config.json`。
 
 ## 安全说明
+
+**认证与访问控制**（`server/auth.py`）：
+
+- **登录认证**：首次启动自动生成管理员账号（`auth.username` 默认 `admin`，密码随机生成、PBKDF2 加密存储、明文只打印一次）。所有 API、WebSocket 与静态资源都要求登录会话；`/api/health` 与登录页除外（不返回敏感数据）
+- **会话管理**：登录成功下发 HttpOnly + SameSite=Strict 会话 Cookie（30 天滑动过期）；脚本可改用 `Authorization: Bearer <会话令牌>`。退出登录立即失效；修改密码注销其他会话
+- **CSWSH 防护**：带 `Origin` 的 WebSocket 握手必须同源，恶意网页无法借你的浏览器劫持本机 WS 执行命令
+- **CSRF 防护**：带 `Origin` 的写请求（POST/PUT/DELETE，含登录接口）必须同源，拦截"简单请求"式跨站调用
+- **DNS rebinding 防护**：`Host` 只接受回环地址、`localhost` 与 IP 字面量；解析到你本机的攻击域名会被拒绝。局域网域名可用 `SHELLPILOT_ALLOWED_HOSTS`（逗号分隔）放行，反代场景用 `SHELLPILOT_ALLOWED_ORIGINS` 放行对应来源
+- **暴力破解缓解**：登录失败固定延迟 1 秒再响应；密码哈希使用 PBKDF2-SHA256（20 万次迭代）
+- **密钥入口校验**：保存 LLM 配置时拒绝内嵌凭据的 `base_url` 与非法协议；明文 HTTP 的公网网关允许保存但会给出告警
+- **主机指纹 TOFU**：首次 SSH 连接记录主机指纹到 `~/.shellpilot/known_hosts`，之后指纹变化即拒绝连接（防中间人窃取密码）；服务器确实重装过系统时，可在「服务器管理」里点「重置指纹」
+
+**其他**：
 
 - SSH 密码 / 私钥 / LLM Key 只存于服务端 `config.json`，前端接口返回时脱敏
 - 危险操作确认有 300 秒超时，超时自动取消

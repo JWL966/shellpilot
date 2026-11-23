@@ -104,10 +104,14 @@ sc query postgresql-x64-18 | grep STATE
 python server/app.py
 ```
 
-预期输出：
+预期输出（**首次启动自动生成管理员账号，密码只加密存储，明文仅打印这一次**）：
 
 ```
 ShellPilot 启动: http://127.0.0.1:8765
+首次启动已生成管理员账号（密码只加密存储，明文仅此一次，请妥善保存）:
+  用户名: admin
+  密码:   p--Qxxxxxxxxxxxx
+浏览器打开上面地址登录使用。忘记密码: python server/app.py --reset-password
 ```
 
 此时前台阻塞：**关闭终端 = 停止服务**。需要常驻见第 6 节。
@@ -116,16 +120,26 @@ ShellPilot 启动: http://127.0.0.1:8765
 
 ```bash
 curl -s http://127.0.0.1:8765/api/health
-# {"status": "ok"}
+# {"status":"ok"}   （健康检查无需登录）
 
-curl -s http://127.0.0.1:8765/api/config/llm
+# 其他接口一律要求登录会话；未登录应返回 401
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8765/api/config/llm
+# 401
+
+# 登录拿会话 Cookie（失败登录有 1 秒延迟，属正常反暴力破解行为）
+curl -s -c cookies.txt -X POST -H "Content-Type: application/json" \
+     -d '{"username":"admin","password":"启动日志里的密码"}' \
+     http://127.0.0.1:8765/api/login
+# {"ok": true, "username": "admin"}
+
+curl -s -b cookies.txt http://127.0.0.1:8765/api/config/llm
 # 能看到 base_url / model / models / has_api_key，api_key 已脱敏为 ********
 ```
 
-浏览器打开 <http://127.0.0.1:8765>，然后：
+浏览器打开 <http://127.0.0.1:8765>，未登录会跳转到登录页，用启动日志里的账号登录。忘记密码：`python server/app.py --reset-password`（旧密码与所有会话立即失效）。然后：
 
-1. **设置** 页填 API Base URL（须含 `/v1`）、API Key、默认模型名、可选模型列表（每行一个）→「测试连接」→「保存」
-2. **服务器管理** 页添加 Linux 主机 →「测试连接」确认 SSH 可达
+1. **设置** 页填 API Base URL（须含 `/v1`）、API Key、默认模型名、可选模型列表（每行一个）→「测试连接」→「保存」；顺手在 **账号安全** 里把随机密码改成自己的
+2. **服务器管理** 页添加 Linux 主机 →「测试连接」确认 SSH 可达（首次连接会记录主机指纹）
 3. **对话** 页选择目标服务器与模型 → 提问
 
 ---
@@ -197,6 +211,11 @@ curl -s http://127.0.0.1:8765/api/config/llm
 |---|---|---|
 | `SHELLPILOT_CONFIG` | 指定配置文件路径 | `<项目根>/config.json` |
 | `SHELLPILOT_PG_DSN` | PostgreSQL 连接串 | `host=127.0.0.1 port=5432 dbname=shellpilot user=postgres password=123456` |
+| `SHELLPILOT_PASSWORD` | 用环境变量提供登录密码（不落盘；优先于配置里的哈希；适合脚本化部署） | 读配置里的哈希，为空则首次生成随机密码 |
+| `SHELLPILOT_KNOWN_HOSTS` | SSH 主机指纹库路径 | `~/.shellpilot/known_hosts` |
+| `SHELLPILOT_HOST_KEY_POLICY` | 指纹校验策略 `tofu`/`strict`/`auto` | 读 `ssh.host_key_policy`（`tofu`） |
+| `SHELLPILOT_ALLOWED_HOSTS` | 额外放行的 Host 域名（逗号分隔） | 空（仅回环/localhost/IP 字面量） |
+| `SHELLPILOT_ALLOWED_ORIGINS` | 额外放行的 Origin（逗号分隔，反代场景用） | 空（仅同源） |
 
 用环境变量启动示例（避免密码写进配置）：
 
@@ -207,7 +226,7 @@ python server/app.py
 
 ### 3.5 监听地址与端口
 
-`server/app.py:42-43` 当前是**硬编码**：
+`server/app.py` 当前是**硬编码**：
 
 ```python
 host = "127.0.0.1"
@@ -216,7 +235,8 @@ port = 8765
 
 - 只监听本机回环，外网访问不到（这是安全默认值，别轻易改）。
 - 需要换端口，改这两行即可（或改成读环境变量）。
-- 需要远程访问：不要直接把 `host` 改成 `0.0.0.0`，用反向代理 + HTTPS + 登录鉴权，见第 4.3 节。
+- 所有接口（除 `/api/health` 与登录页）都要求**登录会话**；并有 Origin / Host 校验（详见第 4 节与 README 安全说明）。
+- 需要远程访问：不要直接把 `host` 改成 `0.0.0.0`，用反向代理 + HTTPS，见第 4.3 节。
 
 ---
 
@@ -224,25 +244,37 @@ port = 8765
 
 ### 4.1 本机访问
 
-`http://127.0.0.1:8765`
+浏览器打开 `http://127.0.0.1:8765`，用启动日志里的账号登录即可。
 
 ### 4.2 局域网访问
 
-改 `server/app.py` 的 `host` 为 `0.0.0.0`，重启后同网段设备访问 `http://<本机IP>:8765`。
+改 `server/app.py` 的 `host` 为 `0.0.0.0`，重启后同网段设备访问 `http://<本机IP>:8765` 并登录。
 **仅限受信内网**；Windows 防火墙需放行该端口：
 
 ```powershell
 New-NetFirewallRule -DisplayName "ShellPilot 8765" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow
 ```
 
+局域网注意事项：
+
+- 访问方 Host 变成 `<本机IP>`（IP 字面量），登录认证照常生效，无需额外配置。
+- 若通过**域名**访问本机（如 `shellpilot.lan`），默认会被 Host 校验拒绝（防 DNS rebinding），需放行：
+  `set SHELLPILOT_ALLOWED_HOSTS=shellpilot.lan` 后重启。
+- 登录密码与 Cookie 走明文 HTTP 传输，受信内网可接受；跨不可信网络请走 4.3 的反代 + HTTPS。
+
 ### 4.3 公网访问（务必加保护）
 
 工具具备"在服务器上执行命令"的能力，**绝不能裸奔在公网**。最低要求：
 
 1. 反向代理：Nginx / Caddy 终止 TLS
-2. 访问鉴权：Nginx `auth_basic`、或前置 OAuth / SSO
+2. 访问鉴权：**内置登录认证已默认启用**；仍建议再加 `auth_basic` 或前置 OAuth / SSO 作为第二道防线
 3. WebSocket 必须透传（`/ws` 需要 `Upgrade` 头）
 4. 防火墙只放行 443
+5. 反代改变了浏览器看到的 `Origin`/`Host`，需放行对应白名单，否则浏览器请求会被 403：
+   ```bash
+   export SHELLPILOT_ALLOWED_HOSTS=ops.example.com
+   export SHELLPILOT_ALLOWED_ORIGINS=https://ops.example.com
+   ```
 
 Nginx 片段：
 
@@ -430,26 +462,22 @@ python tests/test_agent_flow.py
 # ALL 5 TESTS PASSED
 ```
 
-隔离方式：用 `tests/test_config.json` + 独立库 `shellpilot_test`，跑完自动清空测试库。
-第一次跑前先建测试库：
+### 8.2 鉴权测试（自起隔离服务，不碰真实配置）
 
 ```bash
-python - <<'PY'
-import psycopg
-with psycopg.connect("host=127.0.0.1 port=5432 dbname=postgres user=postgres password=123456", autocommit=True) as c:
-    with c.cursor() as cur:
-        cur.execute("SELECT 1 FROM pg_database WHERE datname='shellpilot_test'")
-        if not cur.fetchone():
-            cur.execute("CREATE DATABASE shellpilot_test")
-            print("created shellpilot_test")
-PY
+python tests/test_auth.py
+# ALL AUTH TESTS PASSED
 ```
 
-### 8.2 集成测试（需要服务已在跑）
+- 自动创建临时配置与 `shellpilot_test` 测试库（不存在时自建），跑完即删
+- 覆盖：登录（错误/正确/环境变量密码）、会话 Cookie 与 Bearer、退出登录、修改密码、Origin/Host 校验、base_url 入口校验
+- 失败登录有 1 秒延迟，测试会因此多花几秒，属正常
+
+### 8.3 集成测试（需要服务已在跑）
 
 ```bash
-python server/app.py        # 终端 A
-python tests/test_integration.py   # 终端 B
+SHELLPILOT_PASSWORD=test1234 python server/app.py   # 终端 A
+SHELLPILOT_PASSWORD=test1234 python tests/test_integration.py   # 终端 B
 # ALL INTEGRATION TESTS PASSED
 ```
 
@@ -502,7 +530,8 @@ SSH 连接失败: ...
 ```
 
 排查：主机可达（`ping`/`telnet <ip> 22`）、端口、用户名、密码/私钥格式（支持 Ed25519 / ECDSA / RSA，PEM 或 OpenSSH 格式）。
-主机指纹策略是 `AutoAddPolicy`（自动接受新主机，方便但有中间人风险，敏感环境建议改成固定 known_hosts）。
+
+主机指纹采用 **TOFU** 策略（首次连接记录到 `~/.shellpilot/known_hosts`，之后指纹变化即拒绝，防中间人）。若服务器确实**重装过系统**导致指纹不符被拒，可在「服务器管理」→ 该服务器卡片 →「重置指纹」，或删掉指纹文件里对应条目后重连；没有重装却报指纹变化，请先排查网络环境。
 
 ### 9.5 页面打不开 / 样式丢失 / 404
 
@@ -517,6 +546,13 @@ SSH 连接失败: ...
 
 安全分级在 `server/safety.py`，规则白名单制：**不在白名单的未知命令一律按危险处理**。
 需要放行某类只读命令就往白名单加正则；先跑单元测试确认没误判。
+
+### 9.8 忘记登录密码 / 打开页面要求登录
+
+- 打开页面被重定向到登录页、或接口全部 401：正常行为，用启动日志里打印的账号登录。
+- 忘记密码：服务端执行 `python server/app.py --reset-password`，会生成新随机密码并打印（旧密码与所有已登录会话立即失效）。
+- 脚本化部署可用环境变量：启动时 `set SHELLPILOT_PASSWORD=你的密码`（优先于配置里的哈希，不落盘）。
+- 登录失败有 1 秒延迟再返回，是防暴力破解设计，不是卡死。
 
 ---
 
@@ -535,10 +571,11 @@ SSH 连接失败: ...
 
 ## 11. 安全检查清单
 
-- [ ] `config.json` 不入库、不外传，权限仅限服务账号可读
-- [ ] 服务只监听 `127.0.0.1`；公网访问必须走反代 + HTTPS + 鉴权
+- [ ] `config.json` 不入库、不外传，权限仅限服务账号可读（内含登录密码哈希、服务器凭据、LLM Key）
+- [ ] 首次启动后立即登录并修改随机密码（设置 → 账号安全）
+- [ ] 服务只监听 `127.0.0.1`；公网访问必须走反代 + HTTPS（登录认证已内置）
 - [ ] 数据库使用专用账号（非 `postgres` 超级用户）并限制来源
-- [ ] SSH 使用最小权限账号（不建议 root），敏感环境启用固定 known_hosts
+- [ ] SSH 使用最小权限账号（不建议 root），保持主机指纹 TOFU 校验开启
 - [ ] 危险操作确认机制保持开启（默认 300 秒超时自动取消）
 - [ ] 定期清理/归档历史会话；备份文件按敏感数据保管
 - [ ] 变更前先备份 `config.json` 与数据库
@@ -549,17 +586,19 @@ SSH 连接失败: ...
 
 ```
 E:\shellpilot\
-├── server\app.py            # 入口（host/port 硬编码在此，42-43 行）
-├── server\routes.py         # REST + WebSocket（/ws 入口）
+├── server\app.py            # 入口（host/port 硬编码在此；--reset-password 也在这）
+├── server\auth.py           # 登录认证、会话管理、Origin/Host 校验（登录页 HTML 在此）
+├── server\routes.py         # REST + WebSocket（/api/login、/ws 入口）
 ├── server\agent.py          # ReAct 循环（MAX_ITERATIONS=15, CMD_TIMEOUT=30）
 ├── server\safety.py         # 命令风险分级
-├── server\ssh_manager.py    # SSH 连接池
+├── server\ssh_manager.py    # SSH 连接池 + 主机指纹 TOFU
 ├── server\llm_client.py     # LLM 调用（模型选择在此生效）
-├── server\config.py         # config.json 读写（模型列表、密钥三态）
+├── server\config.py         # config.json 读写（密码哈希、模型列表、密钥三态）
 ├── server\session.py        # PostgreSQL 表结构与读写（DSN 在 20 行）
 ├── web\                     # 前端静态资源（不可分离）
-├── tests\test_agent_flow.py # 单元测试（独立库 shellpilot_test）
-├── tests\test_integration.py# 集成测试（需服务在跑）
+├── tests\test_agent_flow.py # 单元测试
+├── tests\test_auth.py       # 鉴权测试（临时配置 + 独立库 shellpilot_test）
+├── tests\test_integration.py# 集成测试（需服务在跑，SHELLPILOT_PASSWORD 登录）
 ├── config.json              # 运行时生成，含密钥
 └── requirements.txt
 ```

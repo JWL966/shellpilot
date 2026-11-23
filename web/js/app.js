@@ -13,11 +13,19 @@ const App = {
     this.setupTheme();
     this.setupTabs();
     this.setupNewSession();
+    this.setupLogout();
     this.loadServers();
     this.loadModels();
     Chat.init();
     Servers.init();
     Settings.init();
+  },
+
+  setupLogout() {
+    document.getElementById('btn-logout').addEventListener('click', async () => {
+      try { await fetch('/api/logout', { method: 'POST' }); } catch (e) { /* 忽略 */ }
+      location.href = '/login';
+    });
   },
 
   setupTheme() {
@@ -61,6 +69,7 @@ const App = {
   async loadServers() {
     try {
       const resp = await fetch('/api/servers');
+      if (resp.status === 401) { location.href = '/login'; return []; }  // 会话过期
       const data = await resp.json();
       this.state.servers = data.servers || [];
       this.renderServerSelect();

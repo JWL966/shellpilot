@@ -21,6 +21,7 @@
     <button class="icon-btn" id="btn-theme" title="切换明暗主题">☀️</button>
     <span id="status-dot" class="status-dot" title="WebSocket 状态"></span>
     <span id="status-text" class="status-text">未连接</span>
+    <button class="icon-btn" id="btn-logout" title="退出登录" style="font-size:12px;width:auto;padding:0 10px">退出</button>
   </div>
 </header>
 
@@ -82,6 +83,7 @@
   <section class="view" id="view-settings">
     <div class="panel">
       <div class="panel-head"><h2>LLM 设置</h2></div>
+      <div id="llm-warnings" class="llm-warnings hidden"></div>
       <form id="llm-form" class="form">
         <div class="field">
           <label>API Base URL</label>
@@ -116,6 +118,31 @@
           <button type="submit" class="btn btn-primary">保存</button>
           <button type="button" class="btn" id="btn-test-llm">测试连接</button>
           <span id="llm-result" class="result-text"></span>
+        </div>
+      </form>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>账号安全</h2></div>
+      <form id="password-form" class="form">
+        <div class="field">
+          <label>当前密码</label>
+          <input type="password" name="old_password" autocomplete="current-password">
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>新密码（至少 8 位）</label>
+            <input type="password" name="new_password" autocomplete="new-password">
+          </div>
+          <div class="field">
+            <label>确认新密码</label>
+            <input type="password" name="new_password2" autocomplete="new-password">
+          </div>
+        </div>
+        <div class="field-hint">修改成功后，其他已登录的会话会被注销（当前浏览器不受影响）</div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">修改密码</button>
+          <span id="password-result" class="result-text"></span>
         </div>
       </form>
     </div>

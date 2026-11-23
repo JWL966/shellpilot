@@ -10,5 +10,12 @@
     "timeout": 120,
     "history_budget_chars": 0
   },
+  "auth": {
+    "username": "admin",
+    "password_hash": ""
+  },
+  "ssh": {
+    "host_key_policy": "tofu"
+  },
   "servers": []
 }
