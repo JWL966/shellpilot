@@ -50,6 +50,13 @@ CREATE TABLE IF NOT EXISTS messages (
     extra        JSONB
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq);
+CREATE TABLE IF NOT EXISTS users (
+    id            SERIAL PRIMARY KEY,
+    username      TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at    DOUBLE PRECISION NOT NULL,
+    last_login_at DOUBLE PRECISION
+);
 """
 
 _initialized = False
@@ -69,6 +76,63 @@ def init_db() -> None:
         with conn.cursor() as cur:
             cur.execute(SCHEMA)
     _initialized = True
+
+
+# ---------- 用户 ----------
+
+def count_users() -> int:
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM users")
+            return int(cur.fetchone()["n"])
+
+
+def get_user_by_name(username: str) -> Optional[dict[str, Any]]:
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE username = %s", (username,))
+            return cur.fetchone()
+
+
+def get_user_by_id(user_id: int) -> Optional[dict[str, Any]]:
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+            return cur.fetchone()
+
+
+def create_user(username: str, password_hash: str) -> Optional[dict[str, Any]]:
+    """创建用户；用户名已存在（唯一冲突）返回 None。"""
+    init_db()
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO users (username, password_hash, created_at) VALUES (%s,%s,%s) RETURNING *",
+                    (username, password_hash, time.time()),
+                )
+                return cur.fetchone()
+    except psycopg.errors.UniqueViolation:
+        return None
+
+
+def update_user_password(user_id: int, password_hash: str) -> None:
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET password_hash = %s WHERE id = %s",
+                        (password_hash, user_id))
+
+
+def touch_last_login(user_id: int) -> None:
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET last_login_at = %s WHERE id = %s",
+                        (time.time(), user_id))
 
 
 # ---------- 会话 ----------

@@ -49,7 +49,7 @@ cp config.example.json config.json   # Windows: copy config.example.json config.
 python server/app.py
 ```
 
-The startup log prints the server address; **the first start creates an admin account automatically** (the password is stored hashed; the plaintext is printed only this once):
+The startup log prints the server address; **the first start creates an admin account automatically** (accounts live in the database `users` table; the password is stored hashed and the plaintext is printed only this once):
 
 ```
 ShellPilot 启动: http://127.0.0.1:8765
@@ -58,7 +58,9 @@ ShellPilot 启动: http://127.0.0.1:8765
   密码:   xxxxxxxxxxxxxxxx
 ```
 
-Open http://127.0.0.1:8765 in a browser and sign in with those credentials. Forgot the password? Run `python server/app.py --reset-password` on the server (the old password and all sessions are invalidated immediately). You can change the password in **Settings → 账号安全** after logging in.
+Open http://127.0.0.1:8765 in a browser and sign in with those credentials. Forgot the password? Run `python server/app.py --reset-password` on the server (the old password and that account's sessions are invalidated immediately). You can change the password in **Settings → 账号安全** after logging in.
+
+**Multi-user**: the login page has a "register" link (open by default; disable via `auth.allow_registration`). Registered users are independent from the admin — separate sessions, separate password changes — but everyone shares the same server list and LLM config. Upgrading from an old version (password stored in config.json) migrates the admin into the users table automatically; the old password keeps working.
 
 > Detailed setup, background/service running, stop & restart, backup and troubleshooting: [DEPLOY.md](DEPLOY.md) (Chinese).
 
@@ -108,13 +110,12 @@ shellpilot/
 | `llm.models` | selectable models shown in the chat dropdown | `[]` |
 | `llm.timeout` | request timeout in seconds | `120` |
 | `llm.history_budget_chars` | max characters of history replayed to the model; `0` = send everything | `0` |
-| `auth.username` | login username | `admin` |
-| `auth.password_hash` | PBKDF2 hash of the login password; empty = a random password is generated and printed on first start | auto |
+| `auth.allow_registration` | whether open registration is enabled (shows the register link; `false` = only the admin creates accounts server-side) | `true` |
 | `ssh.host_key_policy` | SSH host-key policy: `tofu` (pin on first connect, reject on change) / `strict` / `auto` (no check) | `tofu` |
 
 > Agent internals such as temperature, max_tokens and iteration count are constants in `server/agent.py` and `server/llm_client.py`, not settings. Saving an empty or `********` API key leaves the stored key unchanged.
 
-Environment variables: `SHELLPILOT_CONFIG` (config file path), `SHELLPILOT_PG_DSN` (PostgreSQL DSN, default `host=127.0.0.1 port=5432 dbname=shellpilot user=postgres password=123456`), `SHELLPILOT_PASSWORD` (provide the login password via env; not written to disk, takes precedence over the stored hash), `SHELLPILOT_KNOWN_HOSTS` (SSH known-hosts path, default `~/.shellpilot/known_hosts`), `SHELLPILOT_HOST_KEY_POLICY` (override the host-key policy). The legacy names `YCAI_CONFIG` / `YCAI_PG_DSN` are still accepted.
+Environment variables: `SHELLPILOT_CONFIG` (config file path), `SHELLPILOT_PG_DSN` (PostgreSQL DSN, default `host=127.0.0.1 port=5432 dbname=shellpilot user=postgres password=123456`), `SHELLPILOT_PASSWORD` (initial admin password when the users table is empty; not written to disk, ignored once the account exists), `SHELLPILOT_KNOWN_HOSTS` (SSH known-hosts path, default `~/.shellpilot/known_hosts`), `SHELLPILOT_HOST_KEY_POLICY` (override the host-key policy). The legacy names `YCAI_CONFIG` / `YCAI_PG_DSN` are still accepted.
 
 ## Database
 
@@ -159,8 +160,9 @@ SHELLPILOT_PASSWORD=test1234 python tests/test_integration.py
 
 **Authentication & access control** (`server/auth.py`):
 
-- **Login auth**: the first start creates an admin account (`auth.username`, default `admin`) with a random password stored as a PBKDF2 hash — the plaintext is printed exactly once. Every API call, WebSocket handshake and static asset requires an authenticated session; only `/api/health` and the login page are open (neither returns sensitive data)
-- **Sessions**: login sets an HttpOnly + SameSite=Strict session cookie (30-day sliding expiry); scripts can use `Authorization: Bearer <session token>` instead. Logout invalidates the session immediately; changing the password drops all other sessions
+- **Login auth**: accounts live in the PostgreSQL `users` table; when it is empty on first start an admin account is created (default name `admin`) with a random password stored as a PBKDF2 hash — the plaintext is printed exactly once (or set `SHELLPILOT_PASSWORD` beforehand). Every API call, WebSocket handshake and static asset requires an authenticated session; only `/api/health` and the login/register pages are open (neither returns sensitive data)
+- **Registration & multi-user**: the "register" link on the login page is enabled by default (`auth.allow_registration: false` turns it off; the register page then stays visible but rejects submissions). Each account has its own sessions and password; changing a password only drops that account's other sessions. The server list and LLM config are shared globally. **For public deployments, disable registration** so strangers cannot sign up and spend your LLM key / reuse your stored server credentials
+- **Sessions**: login sets an HttpOnly + SameSite=Strict session cookie (30-day sliding expiry); scripts can use `Authorization: Bearer <session token>` instead. Logout invalidates the session immediately; changing the password drops that account's other sessions
 - **CSWSH protection**: WebSocket handshakes carrying an `Origin` must be same-origin — a malicious web page can no longer hijack your browser's connection to the local WS and run commands through the agent
 - **CSRF protection**: state-changing requests (POST/PUT/DELETE, including the login endpoint itself) carrying an `Origin` must be same-origin, blocking cross-site "simple requests"
 - **DNS-rebinding protection**: the `Host` header must be a loopback address, `localhost` or an IP literal — attacker domains resolving to 127.0.0.1 are rejected. LAN hostnames can be allow-listed via `SHELLPILOT_ALLOWED_HOSTS` (comma-separated); reverse-proxy origins via `SHELLPILOT_ALLOWED_ORIGINS`

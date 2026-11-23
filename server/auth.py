@@ -1,4 +1,4 @@
-"""访问控制：登录认证 + 会话管理 + Origin/Host 校验。
+"""访问控制：登录认证 + 多用户注册 + 会话管理 + Origin/Host 校验。
 
 威胁模型（服务只监听 127.0.0.1，但浏览器就是"外网"入口）：
 1. 跨站 WebSocket 劫持（CSWSH）：用户浏览任意网页时，该网页可以连
@@ -9,16 +9,18 @@
 3. DNS rebinding：攻击者域名解析到 127.0.0.1，浏览器视角构成同源。
 
 认证流程（本模块）：
-- 首次启动生成管理员账号密码（PBKDF2 加密存储，见 server/config.py），
-  浏览器访问 /login 登录，服务端建立会话并下发 HttpOnly Cookie。
-- 会话存于内存（重启即失效，重新登录即可），30 天滑动过期。
+- 用户存于 PostgreSQL 的 users 表（server/session.py）；登录页 /login、
+  注册页 /register，登录/注册成功后服务端建立会话并下发 HttpOnly Cookie。
+- 首次启动 users 表为空时自动创建管理员账号（见 config.ensure_admin_user）。
+- 会话存于内存（重启即失效，重新登录即可），30 天滑动过期，绑定用户 id。
 - 退出登录 / 修改密码会注销会话；Origin/Host 校验独立于认证，
-  对登录接口同样生效（登录 CSRF 也是 CSRF）。
+  对登录/注册接口同样生效（登录 CSRF 也是 CSRF）。
 """
 import ipaddress
 import os
 import secrets
 import time
+from typing import Optional
 from urllib.parse import urlsplit
 
 from aiohttp import web
@@ -29,18 +31,18 @@ COOKIE_NAME = "sp_session"
 COOKIE_MAX_AGE = 30 * 24 * 3600
 SESSION_TTL = 30 * 24 * 3600
 
-# 内存会话表：token -> 过期时间戳（单进程事件循环内访问，无并发问题）
-_sessions: dict[str, float] = {}
+# 内存会话表：token -> (user_id, 过期时间戳)（单进程事件循环内访问，无并发问题）
+_sessions: dict[str, tuple[int, float]] = {}
 
 
 # ---------- 会话管理 ----------
 
-def create_session() -> str:
+def create_session(user_id: int) -> str:
     now = time.time()
-    for tok in [t for t, exp in _sessions.items() if exp < now]:
+    for tok in [t for t, (_, exp) in _sessions.items() if exp < now]:
         _sessions.pop(tok, None)  # 顺手清理过期会话
     token = secrets.token_urlsafe(32)
-    _sessions[token] = now + SESSION_TTL
+    _sessions[token] = (int(user_id), now + SESSION_TTL)
     return token
 
 
@@ -48,12 +50,19 @@ def session_ok(request) -> bool:
     token = session_token_from(request)
     if not token:
         return False
-    exp = _sessions.get(token)
-    if exp is None or exp < time.time():
+    entry = _sessions.get(token)
+    if entry is None or entry[1] < time.time():
         _sessions.pop(token, None)
         return False
-    _sessions[token] = time.time() + SESSION_TTL  # 滑动过期
+    user_id, _ = entry
+    _sessions[token] = (user_id, time.time() + SESSION_TTL)  # 滑动过期
     return True
+
+
+def current_user_id(request) -> Optional[int]:
+    """当前会话绑定的用户 id；未登录返回 None（中间件已保证登录态，防御用）。"""
+    entry = _sessions.get(session_token_from(request))
+    return entry[0] if entry else None
 
 
 def session_token_from(request) -> str:
@@ -68,9 +77,10 @@ def drop_session(token: str) -> None:
         _sessions.pop(token, None)
 
 
-def drop_other_sessions(keep_token: str) -> None:
-    for tok in list(_sessions):
-        if tok != keep_token:
+def drop_other_user_sessions(user_id: int, keep_token: str) -> None:
+    """注销指定用户的其他会话（修改密码后调用；当前会话保留避免自己被登出）。"""
+    for tok, (uid, _) in list(_sessions.items()):
+        if uid == int(user_id) and tok != keep_token:
             _sessions.pop(tok, None)
 
 
@@ -184,9 +194,19 @@ LOGIN_PAGE = """<!DOCTYPE html>
     <button type="submit" id="b">登 录</button>
     <div class="err" id="e"></div>
   </form>
+  <div style="text-align:center;margin-top:6px;font-size:12.5px">
+    <a id="reg-link" href="/register" style="color:#58a6ff">注册新账号</a>
+  </div>
   <div class="hint">首次启动的账号密码在服务启动日志里<br>忘记密码可在服务端执行 python server/app.py --reset-password</div>
 </div>
 <script>
+  // 注册开关关闭时隐藏注册入口
+  fetch('/api/auth/options').then(r => r.json()).then(o => {
+    if (o && o.allow_registration === false) {
+      const link = document.getElementById('reg-link');
+      if (link) link.style.display = 'none';
+    }
+  }).catch(() => {});
   document.getElementById('f').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const btn = document.getElementById('b');
@@ -204,6 +224,95 @@ LOGIN_PAGE = """<!DOCTYPE html>
       });
       if (resp.ok) { location.href = '/'; return; }
       err.textContent = (await resp.json().catch(() => ({}))).error || '登录失败';
+    } catch (e) {
+      err.textContent = '网络错误: ' + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>"""
+
+
+REGISTER_PAGE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>注册 · ShellPilot</title>
+<style>
+  body{background:#0d1117;color:#e6edf3;font-family:system-ui,-apple-system,sans-serif;
+       display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:36px;
+        width:360px;box-sizing:border-box}
+  .logo{font-size:26px;color:#58a6ff;text-align:center}
+  h1{font-size:17px;font-weight:600;text-align:center;margin:6px 0 26px;color:#e6edf3}
+  label{display:block;font-size:12.5px;color:#8b949e;margin:14px 0 6px}
+  input{width:100%;box-sizing:border-box;background:#0d1117;color:#e6edf3;
+        border:1px solid #30363d;border-radius:7px;padding:9px 12px;font-size:13.5px;
+        outline:none;transition:border-color .15s}
+  input:focus{border-color:#58a6ff}
+  button{width:100%;margin-top:22px;background:#238636;color:#fff;border:none;
+         border-radius:7px;padding:10px;cursor:pointer;font-size:14px}
+  button:hover{background:#2ea043}
+  button:disabled{opacity:.6;cursor:default}
+  .err{color:#f85149;font-size:12.5px;margin-top:14px;min-height:17px;text-align:center}
+  .hint{color:#8b949e;font-size:12px;margin-top:18px;line-height:1.7;text-align:center}
+  .links{text-align:center;margin-top:8px;font-size:12.5px}
+  .links a{color:#58a6ff}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">&#9672;</div>
+  <h1>注册 ShellPilot 账号</h1>
+  <form id="f">
+    <label for="u">用户名（1~32 字符，不含空格）</label>
+    <input id="u" type="text" autocomplete="username" autofocus>
+    <label for="p">密码（至少 8 位）</label>
+    <input id="p" type="password" autocomplete="new-password">
+    <label for="p2">确认密码</label>
+    <input id="p2" type="password" autocomplete="new-password">
+    <button type="submit" id="b">注 册</button>
+    <div class="err" id="e"></div>
+  </form>
+  <div class="links">已有账号？<a href="/login">去登录</a></div>
+  <div class="hint">注册后即可登录使用；密码经 PBKDF2 加密存储</div>
+</div>
+<script>
+  fetch('/api/auth/options').then(r => r.json()).then(o => {
+    if (o && o.allow_registration === false) {
+      document.getElementById('e').textContent = '管理员已关闭注册，请联系管理员开通账号';
+      document.getElementById('b').disabled = true;
+      document.getElementById('u').disabled = true;
+      document.getElementById('p').disabled = true;
+      document.getElementById('p2').disabled = true;
+    }
+  }).catch(() => {});
+  document.getElementById('f').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const btn = document.getElementById('b');
+    const err = document.getElementById('e');
+    const pw = document.getElementById('p').value;
+    err.textContent = '';
+    if (pw !== document.getElementById('p2').value) {
+      err.textContent = '两次输入的密码不一致';
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const resp = await fetch('/api/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: document.getElementById('u').value.trim(),
+          password: pw,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok) { location.href = '/'; return; }
+      err.textContent = data.error || '注册失败';
     } catch (e) {
       err.textContent = '网络错误: ' + e.message;
     } finally {
@@ -250,12 +359,16 @@ async def access_middleware(request, handler):
     if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_allowed(request):
         return _deny(request, "跨站请求被拒绝（Origin 不匹配）", 403)
 
-    # 3) 公开端点：健康检查、登录页、登录接口
+    # 3) 公开端点：健康检查、登录页/注册页、登录/注册接口、页面选项
     if request.path == "/api/health":
         return await handler(request)
-    if request.method == "GET" and request.path in ("/login", "/"):
-        return await handler(request)  # /login 渲染登录页；/ 由 index 决定跳转
+    if request.method == "GET" and request.path in ("/login", "/register", "/"):
+        return await handler(request)  # /login、/register 渲染页面；/ 由 index 决定跳转
     if request.path == "/api/login" and request.method == "POST":
+        return await handler(request)
+    if request.path == "/api/register" and request.method == "POST":
+        return await handler(request)
+    if request.path == "/api/auth/options" and request.method == "GET":
         return await handler(request)
 
     # 4) 其余一律要求已登录会话（含静态资源与 /ws）

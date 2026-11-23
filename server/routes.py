@@ -11,7 +11,8 @@ from agent import AgentSession
 from auth import (
     clear_session_cookie,
     create_session as create_auth_session,
-    drop_other_sessions,
+    current_user_id,
+    drop_other_user_sessions,
     drop_session as drop_auth_session,
     session_token_from,
     set_session_cookie,
@@ -28,6 +29,13 @@ async def health(request: web.Request) -> web.Response:
 
 # ---------- 认证 ----------
 
+async def auth_options(request: web.Request) -> web.Response:
+    """登录/注册页的公开选项（是否允许注册）。"""
+    return web.json_response({
+        "allow_registration": config_store.registration_allowed(),
+    })
+
+
 async def login(request: web.Request) -> web.Response:
     try:
         body = await request.json()
@@ -35,11 +43,37 @@ async def login(request: web.Request) -> web.Response:
         return web.json_response({"error": "请求体必须是 JSON"}, status=400)
     username = str(body.get("username") or "")
     password = str(body.get("password") or "")
-    if not config_store.verify_credentials(username, password):
+    user_id = config_store.verify_credentials(username, password)
+    if user_id is None:
         await asyncio.sleep(1.0)  # 拖慢暴力破解（异步休眠，不阻塞事件循环）
         return web.json_response({"error": "用户名或密码不正确"}, status=401)
-    token = create_auth_session()
-    resp = web.json_response({"ok": True, "username": config_store.admin_username()})
+    session_store.touch_last_login(user_id)
+    token = create_auth_session(user_id)
+    resp = web.json_response({"ok": True, "username": str(username).strip()})
+    set_session_cookie(resp, token)
+    return resp
+
+
+async def register(request: web.Request) -> web.Response:
+    if not config_store.registration_allowed():
+        return web.json_response({"error": "管理员已关闭注册"}, status=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "请求体必须是 JSON"}, status=400)
+    username = str(body.get("username") or "").strip()
+    password = str(body.get("password") or "")
+    if not (1 <= len(username) <= 32) or any(c.isspace() for c in username):
+        return web.json_response(
+            {"error": "用户名需为 1~32 个字符且不含空格"}, status=400)
+    if len(password) < 8:
+        return web.json_response({"error": "密码至少 8 位"}, status=400)
+    user = session_store.create_user(username, config_store._hash_password(password))
+    if user is None:
+        return web.json_response({"error": "用户名已被占用"}, status=400)
+    session_store.touch_last_login(int(user["id"]))
+    token = create_auth_session(int(user["id"]))
+    resp = web.json_response({"ok": True, "username": username})
     set_session_cookie(resp, token)
     return resp
 
@@ -52,17 +86,20 @@ async def logout(request: web.Request) -> web.Response:
 
 
 async def change_password(request: web.Request) -> web.Response:
+    user_id = current_user_id(request)
+    if user_id is None:
+        return web.json_response({"error": "未登录或会话已过期"}, status=401)
     try:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "请求体必须是 JSON"}, status=400)
     try:
         config_store.change_password(
-            str(body.get("old_password") or ""), str(body.get("new_password") or ""))
+            user_id, str(body.get("old_password") or ""), str(body.get("new_password") or ""))
     except ValueError as e:
         return web.json_response({"error": str(e)}, status=400)
-    # 密码已变：注销其他会话，保留当前会话避免自己被登出
-    drop_other_sessions(session_token_from(request))
+    # 密码已变：注销该用户的其他会话，保留当前会话避免自己被登出
+    drop_other_user_sessions(user_id, session_token_from(request))
     return web.json_response({"ok": True})
 
 
@@ -283,8 +320,10 @@ def setup_routes(app: web.Application):
     app.router.add_get("/api/health", health)
 
     app.router.add_post("/api/login", login)
+    app.router.add_post("/api/register", register)
     app.router.add_post("/api/logout", logout)
     app.router.add_post("/api/auth/password", change_password)
+    app.router.add_get("/api/auth/options", auth_options)
 
     app.router.add_get("/api/servers", list_servers)
     app.router.add_post("/api/servers", add_server)

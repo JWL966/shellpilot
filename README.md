@@ -45,7 +45,7 @@ cp config.example.json config.json   # Windows: copy config.example.json config.
 python server/app.py
 ```
 
-启动日志会打印服务地址；**首次启动会自动生成管理员账号**（密码只加密存储，明文仅打印这一次）：
+启动日志会打印服务地址；**首次启动会自动创建管理员账号**（账号存于数据库 `users` 表，密码只加密存储，明文仅打印这一次）：
 
 ```
 ShellPilot 启动: http://127.0.0.1:8765
@@ -54,7 +54,9 @@ ShellPilot 启动: http://127.0.0.1:8765
   密码:   xxxxxxxxxxxxxxxx
 ```
 
-浏览器打开 http://127.0.0.1:8765 ，用上面的账号登录。忘记密码可在服务端执行 `python server/app.py --reset-password` 重置（旧密码与所有登录会话立即失效）。登录后可在 **设置 → 账号安全** 里修改密码。
+浏览器打开 http://127.0.0.1:8765 ，用上面的账号登录。忘记密码可在服务端执行 `python server/app.py --reset-password` 重置（旧密码与该账号所有登录会话立即失效）。登录后可在 **设置 → 账号安全** 里修改密码。
+
+**多用户**：登录页提供「注册新账号」入口（默认开放，可用配置 `auth.allow_registration` 关闭）。注册的用户与管理员相互独立——各自的会话、修改密码互不影响；所有账号都能管理同一份服务器列表与 LLM 配置。旧版本（密码存于 config.json）首次启动时自动迁移到用户表，原密码继续有效。
 
 > 完整的环境准备、数据库建库、后台常驻、停止/重启、备份恢复与故障排查，见 [DEPLOY.md](DEPLOY.md)。
 
@@ -103,13 +105,12 @@ shellpilot/
 | `llm.models` | 可选模型列表；对话页下拉框据此切换 | `[]` |
 | `llm.timeout` | 请求超时秒 | `120` |
 | `llm.history_budget_chars` | 回灌模型的历史字符上限，`0` = 全量发送 | `0` |
-| `auth.username` | 登录用户名 | `admin` |
-| `auth.password_hash` | 登录密码的 PBKDF2 哈希；留空则首次启动生成随机密码并打印 | 自动生成 |
+| `auth.allow_registration` | 是否开放注册（登录页显示注册入口；`false` 时仅管理员在服务端建号） | `true` |
 | `ssh.host_key_policy` | SSH 主机指纹校验：`tofu`（首次记录，变更拒绝）/ `strict` / `auto`（不校验） | `tofu` |
 
 > 温度、max_tokens、迭代轮次等 Agent 内部参数已固化为代码常量（`server/agent.py`、`server/llm_client.py`），不作为配置暴露。API Key 留空或 `********` 保存表示不修改原密钥。
 
-可用环境变量 `SHELLPILOT_CONFIG` 指定配置文件路径；`SHELLPILOT_PG_DSN` 指定 PostgreSQL 连接串（默认 `host=127.0.0.1 port=5432 dbname=shellpilot user=postgres password=123456`）；`SHELLPILOT_PASSWORD` 用环境变量提供登录密码（不落盘，优先于配置里的哈希）；`SHELLPILOT_KNOWN_HOSTS` 指定 SSH 指纹库路径（默认 `~/.shellpilot/known_hosts`）；`SHELLPILOT_HOST_KEY_POLICY` 覆盖指纹校验策略。旧变量名 `YCAI_CONFIG` / `YCAI_PG_DSN` 仍然兼容。
+可用环境变量 `SHELLPILOT_CONFIG` 指定配置文件路径；`SHELLPILOT_PG_DSN` 指定 PostgreSQL 连接串（默认 `host=127.0.0.1 port=5432 dbname=shellpilot user=postgres password=123456`）；`SHELLPILOT_PASSWORD` 指定首次建管理员账号时的初始密码（不落盘；账号已存在时无效）；`SHELLPILOT_KNOWN_HOSTS` 指定 SSH 指纹库路径（默认 `~/.shellpilot/known_hosts`）；`SHELLPILOT_HOST_KEY_POLICY` 覆盖指纹校验策略。旧变量名 `YCAI_CONFIG` / `YCAI_PG_DSN` 仍然兼容。
 
 ## 数据库
 
@@ -153,8 +154,9 @@ SHELLPILOT_PASSWORD=test1234 python tests/test_integration.py
 
 **认证与访问控制**（`server/auth.py`）：
 
-- **登录认证**：首次启动自动生成管理员账号（`auth.username` 默认 `admin`，密码随机生成、PBKDF2 加密存储、明文只打印一次）。所有 API、WebSocket 与静态资源都要求登录会话；`/api/health` 与登录页除外（不返回敏感数据）
-- **会话管理**：登录成功下发 HttpOnly + SameSite=Strict 会话 Cookie（30 天滑动过期）；脚本可改用 `Authorization: Bearer <会话令牌>`。退出登录立即失效；修改密码注销其他会话
+- **登录认证**：账号存于 PostgreSQL `users` 表，首次启动 users 表为空时自动创建管理员（用户名默认 `admin`，密码随机生成、PBKDF2 加密存储、明文只打印一次；也可用 `SHELLPILOT_PASSWORD` 指定）。所有 API、WebSocket 与静态资源都要求登录会话；`/api/health`、登录/注册页除外（不返回敏感数据）
+- **注册与多用户**：登录页「注册新账号」默认开放（`auth.allow_registration: false` 可关闭，关闭后注册页仍可见但无法提交）。各账号会话与密码相互独立，修改密码只注销自己的其他会话；服务器列表与 LLM 配置为全局共享。**公网部署建议关闭注册**，避免陌生人自行注册后使用你的 LLM Key 与服务器凭据
+- **会话管理**：登录成功下发 HttpOnly + SameSite=Strict 会话 Cookie（30 天滑动过期）；脚本可改用 `Authorization: Bearer <会话令牌>`。退出登录立即失效；修改密码注销该账号的其他会话
 - **CSWSH 防护**：带 `Origin` 的 WebSocket 握手必须同源，恶意网页无法借你的浏览器劫持本机 WS 执行命令
 - **CSRF 防护**：带 `Origin` 的写请求（POST/PUT/DELETE，含登录接口）必须同源，拦截"简单请求"式跨站调用
 - **DNS rebinding 防护**：`Host` 只接受回环地址、`localhost` 与 IP 字面量；解析到你本机的攻击域名会被拒绝。局域网域名可用 `SHELLPILOT_ALLOWED_HOSTS`（逗号分隔）放行，反代场景用 `SHELLPILOT_ALLOWED_ORIGINS` 放行对应来源

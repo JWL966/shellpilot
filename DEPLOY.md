@@ -104,7 +104,7 @@ sc query postgresql-x64-18 | grep STATE
 python server/app.py
 ```
 
-预期输出（**首次启动自动生成管理员账号，密码只加密存储，明文仅打印这一次**）：
+预期输出（**首次启动自动创建管理员账号（写入数据库 `users` 表），密码只加密存储，明文仅打印这一次**）：
 
 ```
 ShellPilot 启动: http://127.0.0.1:8765
@@ -113,6 +113,8 @@ ShellPilot 启动: http://127.0.0.1:8765
   密码:   p--Qxxxxxxxxxxxx
 浏览器打开上面地址登录使用。忘记密码: python server/app.py --reset-password
 ```
+
+旧版本升级（config.json 里存有 `auth.username` / `auth.password_hash`）会打印「已把旧版管理员账号迁移到数据库用户表，原密码继续有效」，账号密码原样迁入 users 表，无需重置。
 
 此时前台阻塞：**关闭终端 = 停止服务**。需要常驻见第 6 节。
 
@@ -136,11 +138,13 @@ curl -s -b cookies.txt http://127.0.0.1:8765/api/config/llm
 # 能看到 base_url / model / models / has_api_key，api_key 已脱敏为 ********
 ```
 
-浏览器打开 <http://127.0.0.1:8765>，未登录会跳转到登录页，用启动日志里的账号登录。忘记密码：`python server/app.py --reset-password`（旧密码与所有会话立即失效）。然后：
+浏览器打开 <http://127.0.0.1:8765>，未登录会跳转到登录页，用启动日志里的账号登录。忘记密码：`python server/app.py --reset-password`（旧密码与该账号所有会话立即失效）。然后：
 
 1. **设置** 页填 API Base URL（须含 `/v1`）、API Key、默认模型名、可选模型列表（每行一个）→「测试连接」→「保存」；顺手在 **账号安全** 里把随机密码改成自己的
 2. **服务器管理** 页添加 Linux 主机 →「测试连接」确认 SSH 可达（首次连接会记录主机指纹）
 3. **对话** 页选择目标服务器与模型 → 提问
+
+**多用户注册**：登录页右下有「注册新账号」入口，默认开放。给同事开账号直接让他们自助注册即可；不想对外开放时，把 `config.json` 里 `auth.allow_registration` 改为 `false` 并重启（登录页的注册入口随之隐藏）。所有账号共用服务器列表与 LLM 配置，会话与密码相互独立。**公网部署务必关闭注册。**
 
 ---
 
@@ -211,7 +215,7 @@ curl -s -b cookies.txt http://127.0.0.1:8765/api/config/llm
 |---|---|---|
 | `SHELLPILOT_CONFIG` | 指定配置文件路径 | `<项目根>/config.json` |
 | `SHELLPILOT_PG_DSN` | PostgreSQL 连接串 | `host=127.0.0.1 port=5432 dbname=shellpilot user=postgres password=123456` |
-| `SHELLPILOT_PASSWORD` | 用环境变量提供登录密码（不落盘；优先于配置里的哈希；适合脚本化部署） | 读配置里的哈希，为空则首次生成随机密码 |
+| `SHELLPILOT_PASSWORD` | 首次建管理员账号时的初始密码（不落盘；users 表已有账号时忽略；适合脚本化部署） | users 表为空时生成随机密码并打印 |
 | `SHELLPILOT_KNOWN_HOSTS` | SSH 主机指纹库路径 | `~/.shellpilot/known_hosts` |
 | `SHELLPILOT_HOST_KEY_POLICY` | 指纹校验策略 `tofu`/`strict`/`auto` | 读 `ssh.host_key_policy`（`tofu`） |
 | `SHELLPILOT_ALLOWED_HOSTS` | 额外放行的 Host 域名（逗号分隔） | 空（仅回环/localhost/IP 字面量） |
@@ -235,7 +239,7 @@ port = 8765
 
 - 只监听本机回环，外网访问不到（这是安全默认值，别轻易改）。
 - 需要换端口，改这两行即可（或改成读环境变量）。
-- 所有接口（除 `/api/health` 与登录页）都要求**登录会话**；并有 Origin / Host 校验（详见第 4 节与 README 安全说明）。
+- 所有接口（除 `/api/health` 与登录/注册页）都要求**登录会话**；并有 Origin / Host 校验（详见第 4 节与 README 安全说明）。
 - 需要远程访问：不要直接把 `host` 改成 `0.0.0.0`，用反向代理 + HTTPS，见第 4.3 节。
 
 ---
@@ -470,14 +474,15 @@ python tests/test_auth.py
 ```
 
 - 自动创建临时配置与 `shellpilot_test` 测试库（不存在时自建），跑完即删
-- 覆盖：登录（错误/正确/环境变量密码）、会话 Cookie 与 Bearer、退出登录、修改密码、Origin/Host 校验、base_url 入口校验
+- 覆盖：登录（错误/正确）、注册（成功自动登录/重名/弱密码/注册开关）、多用户会话隔离、会话 Cookie 与 Bearer、退出登录、修改密码、Origin/Host 校验、base_url 入口校验
 - 失败登录有 1 秒延迟，测试会因此多花几秒，属正常
 
 ### 8.3 集成测试（需要服务已在跑）
 
 ```bash
-SHELLPILOT_PASSWORD=test1234 python server/app.py   # 终端 A
+SHELLPILOT_PASSWORD=test1234 python server/app.py   # 终端 A（users 表为空时以此密码建管理员）
 SHELLPILOT_PASSWORD=test1234 python tests/test_integration.py   # 终端 B
+# 注意：若测试库已有旧 admin 且密码不同，先用 --reset-password 重置或清空 users 表
 # ALL INTEGRATION TESTS PASSED
 ```
 
@@ -550,9 +555,10 @@ SSH 连接失败: ...
 ### 9.8 忘记登录密码 / 打开页面要求登录
 
 - 打开页面被重定向到登录页、或接口全部 401：正常行为，用启动日志里打印的账号登录。
-- 忘记密码：服务端执行 `python server/app.py --reset-password`，会生成新随机密码并打印（旧密码与所有已登录会话立即失效）。
-- 脚本化部署可用环境变量：启动时 `set SHELLPILOT_PASSWORD=你的密码`（优先于配置里的哈希，不落盘）。
+- 忘记密码：服务端执行 `python server/app.py --reset-password`，会生成新随机密码并打印（旧密码与该账号所有已登录会话立即失效）。
+- 脚本化部署可用环境变量：启动时 `set SHELLPILOT_PASSWORD=你的密码`（仅首次建管理员账号时生效；账号已存在请用 `--reset-password`）。
 - 登录失败有 1 秒延迟再返回，是防暴力破解设计，不是卡死。
+- 注册入口不见了/无法注册：检查 `config.json` 的 `auth.allow_registration` 是否为 `false`（关闭后登录页隐藏注册入口，注册页提交返回 403）。
 
 ---
 
@@ -571,8 +577,9 @@ SSH 连接失败: ...
 
 ## 11. 安全检查清单
 
-- [ ] `config.json` 不入库、不外传，权限仅限服务账号可读（内含登录密码哈希、服务器凭据、LLM Key）
+- [ ] `config.json` 不入库、不外传，权限仅限服务账号可读（内含服务器凭据、LLM Key；登录密码哈希在数据库 users 表）
 - [ ] 首次启动后立即登录并修改随机密码（设置 → 账号安全）
+- [ ] 公网部署关闭注册：`config.json` 里 `auth.allow_registration: false`，避免陌生人自助注册使用你的 LLM Key 与服务器凭据
 - [ ] 服务只监听 `127.0.0.1`；公网访问必须走反代 + HTTPS（登录认证已内置）
 - [ ] 数据库使用专用账号（非 `postgres` 超级用户）并限制来源
 - [ ] SSH 使用最小权限账号（不建议 root），保持主机指纹 TOFU 校验开启

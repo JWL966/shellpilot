@@ -10,6 +10,8 @@ import uuid
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
+import session as session_store
+
 CONFIG_PATH = os.environ.get(
     "SHELLPILOT_CONFIG",
     os.environ.get(  # 兼容旧变量名
@@ -30,11 +32,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # 回灌模型的历史字符上限；0 = 不裁剪（全量发送）。大上下文模型保持 0 即可。
         "history_budget_chars": 0,
     },
-    # 登录账号：password_hash 为空时首次启动自动生成随机密码（PBKDF2 加密存储，
-    # 明文只在启动日志打印一次）；环境变量 SHELLPILOT_PASSWORD 可覆盖校验
+    # 登录账号存于 PostgreSQL 的 users 表（见 server/session.py）；此处仅控制
+    # 是否开放注册。旧版 auth.username / auth.password_hash 首次启动时自动迁移。
     "auth": {
-        "username": "admin",
-        "password_hash": "",
+        "allow_registration": True,
     },
     # SSH 主机指纹校验策略：
     #   tofu   = 首次连接记录指纹，之后指纹变化即拒绝（推荐）
@@ -105,44 +106,8 @@ def _hash_password(password: str, salt: Optional[bytes] = None) -> str:
     return f"pbkdf2_sha256${_PBKDF2_ITERATIONS}${salt.hex()}${digest.hex()}"
 
 
-def admin_username() -> str:
-    with _lock:
-        name = str((_load().get("auth") or {}).get("username") or "").strip()
-    return name or "admin"
-
-
-def ensure_password() -> tuple[str, bool]:
-    """确保登录密码已设置。password_hash 为空时生成随机密码并保存其哈希。
-
-    返回 (明文密码或空串, 是否新生成)。明文只在新生成时返回一次（启动日志打印），
-    配置里永远只存 PBKDF2 哈希。环境变量 SHELLPILOT_PASSWORD 设置时不落盘。
-    """
-    env_pw = os.environ.get("SHELLPILOT_PASSWORD", "").strip()
-    if env_pw:
-        return "", False
-    with _lock:
-        data = _load()
-        auth = data.setdefault("auth", {})
-        if str(auth.get("password_hash") or "").strip():
-            return "", False
-        pw = secrets.token_urlsafe(12)
-        auth["password_hash"] = _hash_password(pw)
-        _save(data)
-        return pw, True
-
-
-def verify_credentials(username: str, password: str) -> bool:
-    """校验登录凭据。环境变量 SHELLPILOT_PASSWORD 设置时优先用它校验。"""
-    if not username or not password:
-        return False
-    user_ok = hmac.compare_digest(
-        str(username).strip().encode("utf-8"), admin_username().encode("utf-8"))
-    env_pw = os.environ.get("SHELLPILOT_PASSWORD", "").strip()
-    if env_pw:
-        return user_ok and hmac.compare_digest(
-            password.encode("utf-8"), env_pw.encode("utf-8"))
-    with _lock:
-        stored = str((_load().get("auth") or {}).get("password_hash") or "").strip()
+def check_password(stored: str, password: str) -> bool:
+    """用 PBKDF2 哈希校验明文密码（常数时间比较）。"""
     if not stored:
         return False
     try:
@@ -151,31 +116,92 @@ def verify_credentials(username: str, password: str) -> bool:
             return False
         digest = hashlib.pbkdf2_hmac(
             "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(iters))
-        return user_ok and hmac.compare_digest(digest.hex(), hash_hex)
+        return hmac.compare_digest(digest.hex(), hash_hex)
     except (ValueError, TypeError):
         return False
 
 
-def change_password(old: str, new: str) -> None:
-    """修改密码（需验证原密码）。失败抛 ValueError。"""
-    if not verify_credentials(admin_username(), str(old or "")):
+def admin_username() -> str:
+    """管理员用户名：兼容读取旧版 config 字段，缺省 admin。"""
+    with _lock:
+        name = str((_load().get("auth") or {}).get("username") or "").strip()
+    return name or "admin"
+
+
+def registration_allowed() -> bool:
+    with _lock:
+        val = (_load().get("auth") or {}).get("allow_registration")
+    return val if isinstance(val, bool) else True
+
+
+def _cleanup_legacy_auth_fields() -> None:
+    """旧版单用户字段（auth.username / auth.password_hash）已迁移进 users 表后清除。"""
+    with _lock:
+        data = _load()
+        auth = data.get("auth") or {}
+        if "username" in auth or "password_hash" in auth:
+            auth.pop("username", None)
+            auth.pop("password_hash", None)
+            data["auth"] = auth
+            _save(data)
+
+
+def ensure_admin_user() -> tuple[str, str]:
+    """users 表为空时创建管理员账号。
+
+    初始密码优先级：SHELLPILOT_PASSWORD 环境变量 > 旧版 config 的
+    password_hash（无缝迁移，明文不可知）> 随机生成（启动日志打印一次）。
+    返回 (明文密码或空串, "created" | "migrated" | "exists")。
+    """
+    env_pw = os.environ.get("SHELLPILOT_PASSWORD", "").strip()
+    if session_store.count_users() == 0:
+        username = admin_username()
+        with _lock:
+            legacy_hash = str(
+                (_load().get("auth") or {}).get("password_hash") or "").strip()
+        if not env_pw and legacy_hash:
+            if session_store.create_user(username, legacy_hash) is not None:
+                _cleanup_legacy_auth_fields()
+                return "", "migrated"
+        pw = env_pw or secrets.token_urlsafe(12)
+        if session_store.create_user(username, _hash_password(pw)) is not None:
+            _cleanup_legacy_auth_fields()
+            return pw, "created"
+    else:
+        _cleanup_legacy_auth_fields()
+    return "", "exists"
+
+
+def verify_credentials(username: str, password: str) -> Optional[int]:
+    """校验登录凭据（查 users 表），成功返回用户 id，失败返回 None。"""
+    if not username or not password:
+        return None
+    user = session_store.get_user_by_name(str(username).strip())
+    if not user or not check_password(str(user["password_hash"]), password):
+        return None
+    return int(user["id"])
+
+
+def change_password(user_id: int, old: str, new: str) -> None:
+    """修改用户密码（需验证原密码）。失败抛 ValueError。"""
+    row = session_store.get_user_by_id(user_id)
+    if not row or not check_password(str(row["password_hash"]), str(old or "")):
         raise ValueError("原密码不正确")
     new = str(new or "")
     if not (8 <= len(new) <= 128):
         raise ValueError("新密码长度需在 8~128 位之间")
-    with _lock:
-        data = _load()
-        data.setdefault("auth", {})["password_hash"] = _hash_password(new)
-        _save(data)
+    session_store.update_user_password(user_id, _hash_password(new))
 
 
 def reset_password() -> str:
-    """命令行重置：生成新的随机密码，返回明文（打印给用户）。"""
+    """命令行重置管理员密码：不存在则创建，存在则覆盖。返回明文（打印给用户）。"""
     pw = secrets.token_urlsafe(12)
-    with _lock:
-        data = _load()
-        data.setdefault("auth", {})["password_hash"] = _hash_password(pw)
-        _save(data)
+    username = admin_username()
+    user = session_store.get_user_by_name(username)
+    if user:
+        session_store.update_user_password(int(user["id"]), _hash_password(pw))
+    else:
+        session_store.create_user(username, _hash_password(pw))
     return pw
 
 

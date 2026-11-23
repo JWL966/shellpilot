@@ -11,8 +11,7 @@
     "history_budget_chars": 0
   },
   "auth": {
-    "username": "admin",
-    "password_hash": ""
+    "allow_registration": true
   },
   "ssh": {
     "host_key_policy": "tofu"

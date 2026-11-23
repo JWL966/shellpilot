@@ -32,6 +32,13 @@ async def login_page(request: web.Request) -> web.Response:
                         content_type="text/html", charset="utf-8")
 
 
+async def register_page(request: web.Request) -> web.Response:
+    if auth_gate.session_ok(request):
+        raise web.HTTPFound("/")
+    return web.Response(text=auth_gate.REGISTER_PAGE,
+                        content_type="text/html", charset="utf-8")
+
+
 async def on_cleanup(app: web.Application):
     ssh_manager.close_all()
     await llm_client.close()
@@ -47,6 +54,7 @@ def create_app() -> web.Application:
     app.router.add_static("/js/", os.path.join(WEB_DIR, "js"), show_index=False)
     app.router.add_get("/", index)
     app.router.add_get("/login", login_page)
+    app.router.add_get("/register", register_page)
 
     app.on_cleanup.append(on_cleanup)
     return app
@@ -67,14 +75,16 @@ if __name__ == "__main__":
         sys.exit(_cli_reset_password())
     host = "127.0.0.1"
     port = 8765
-    password, created = config_store.ensure_password()
+    password, status = config_store.ensure_admin_user()
     print(f"ShellPilot 启动: http://{host}:{port}", flush=True)
-    if created:
+    if status == "created":
         print("首次启动已生成管理员账号（密码只加密存储，明文仅此一次，请妥善保存）:", flush=True)
         print(f"  用户名: {config_store.admin_username()}", flush=True)
         print(f"  密码:   {password}", flush=True)
+    elif status == "migrated":
+        print("已把旧版管理员账号迁移到数据库用户表，原密码继续有效", flush=True)
     elif os.environ.get("SHELLPILOT_PASSWORD", "").strip():
-        print("登录密码来自环境变量 SHELLPILOT_PASSWORD", flush=True)
+        print("管理员初始密码来自环境变量 SHELLPILOT_PASSWORD", flush=True)
     print("浏览器打开上面地址登录使用。忘记密码: python server/app.py --reset-password", flush=True)
     for w in config_store.llm_warnings():
         print(f"[配置告警] {w}", flush=True)
