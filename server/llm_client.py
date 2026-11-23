@@ -1,4 +1,7 @@
-"""LLM 客户端：兼容 OpenAI Chat Completions 协议（DeepSeek/通义/Kimi/OpenAI 等）。"""
+"""LLM 客户端：兼容 OpenAI Chat Completions 协议（DeepSeek/通义/Kimi/OpenAI 等）。
+
+每个用户有独立的 LLM 配置（base_url / api_key / 模型），调用时传入 user_id。
+"""
 import json
 from typing import Any, AsyncIterator, Optional
 
@@ -19,23 +22,23 @@ class LLMClient:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
 
-    def _headers(self) -> dict[str, str]:
-        cfg = get_llm_config_raw()
+    def _headers(self, user_id: int) -> dict[str, str]:
+        cfg = get_llm_config_raw(user_id)
         return {
             "Authorization": f"Bearer {cfg['api_key']}",
             "Content-Type": "application/json",
         }
 
-    def _endpoint(self) -> str:
-        cfg = get_llm_config_raw()
+    def _endpoint(self, user_id: int) -> str:
+        cfg = get_llm_config_raw(user_id)
         base = cfg["base_url"].rstrip("/")
         return f"{base}/chat/completions"
 
-    def _payload(self, messages: list[dict], tools: Optional[list] = None,
+    def _payload(self, user_id: int, messages: list[dict], tools: Optional[list] = None,
                  stream: bool = False, model: Optional[str] = None) -> dict:
-        cfg = get_llm_config_raw()
+        cfg = get_llm_config_raw(user_id)
         payload: dict[str, Any] = {
-            "model": resolve_model(model) or cfg["model"],
+            "model": resolve_model(user_id, model) or cfg["model"],
             "messages": messages,
             "stream": stream,
         }
@@ -44,16 +47,16 @@ class LLMClient:
             payload["tool_choice"] = "auto"
         return payload
 
-    async def chat(self, messages: list[dict], tools: Optional[list] = None,
+    async def chat(self, user_id: int, messages: list[dict], tools: Optional[list] = None,
                    model: Optional[str] = None) -> dict:
         """非流式请求，返回完整响应 JSON。"""
         await self._ensure_session()
-        cfg = get_llm_config_raw()
+        cfg = get_llm_config_raw(user_id)
         try:
             async with self._session.post(
-                self._endpoint(),
-                headers=self._headers(),
-                json=self._payload(messages, tools, stream=False, model=model),
+                self._endpoint(user_id),
+                headers=self._headers(user_id),
+                json=self._payload(user_id, messages, tools, stream=False, model=model),
                 timeout=aiohttp.ClientTimeout(total=cfg.get("timeout", 120)),
             ) as resp:
                 body = await resp.text()
@@ -64,19 +67,19 @@ class LLMClient:
         except aiohttp.ClientError as e:
             raise LLMError(f"LLM 网络错误: {e}") from e
 
-    async def chat_stream(self, messages: list[dict], tools: Optional[list] = None,
+    async def chat_stream(self, user_id: int, messages: list[dict], tools: Optional[list] = None,
                           model: Optional[str] = None) -> AsyncIterator[dict]:
         """流式请求，yield 增量事件：
         {"type": "content", "delta": "..."} 或 {"type": "tool_call", "tool_calls": [...]}（最终聚合）。
         """
         await self._ensure_session()
-        cfg = get_llm_config_raw()
+        cfg = get_llm_config_raw(user_id)
         tool_call_acc: dict[int, dict] = {}
         try:
             async with self._session.post(
-                self._endpoint(),
-                headers=self._headers(),
-                json=self._payload(messages, tools, stream=True, model=model),
+                self._endpoint(user_id),
+                headers=self._headers(user_id),
+                json=self._payload(user_id, messages, tools, stream=True, model=model),
                 timeout=aiohttp.ClientTimeout(total=cfg.get("timeout", 120)),
             ) as resp:
                 if resp.status != 200:
@@ -118,14 +121,14 @@ class LLMClient:
         except aiohttp.ClientError as e:
             raise LLMError(f"LLM 网络错误: {e}") from e
 
-    async def test_connection(self, model: Optional[str] = None) -> dict[str, Any]:
+    async def test_connection(self, user_id: int, model: Optional[str] = None) -> dict[str, Any]:
         try:
             await self._ensure_session()
-            cfg = get_llm_config_raw()
+            cfg = get_llm_config_raw(user_id)
             async with self._session.post(
-                self._endpoint(),
-                headers=self._headers(),
-                json={"model": resolve_model(model) or cfg["model"],
+                self._endpoint(user_id),
+                headers=self._headers(user_id),
+                json={"model": resolve_model(user_id, model) or cfg["model"],
                       "messages": [{"role": "user", "content": "ping"}]},
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:

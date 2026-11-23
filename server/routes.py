@@ -103,9 +103,10 @@ async def change_password(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-# 服务器管理
+# 服务器管理（全部按当前用户隔离）
 async def list_servers(request: web.Request) -> web.Response:
-    return web.json_response({"servers": config_store.list_servers()})
+    user_id = current_user_id(request)
+    return web.json_response({"servers": config_store.list_servers(user_id)})
 
 
 async def add_server(request: web.Request) -> web.Response:
@@ -113,29 +114,35 @@ async def add_server(request: web.Request) -> web.Response:
     required = ("name", "host", "username")
     if not all(body.get(k) for k in required):
         return web.json_response({"error": "缺少必填字段: name/host/username"}, status=400)
-    server = config_store.add_server(body)
+    user_id = current_user_id(request)
+    server = config_store.add_server(user_id, body)
     return web.json_response({"server": server})
 
 
 async def update_server(request: web.Request) -> web.Response:
+    user_id = current_user_id(request)
     server_id = request.match_info["id"]
     body = await request.json()
-    updated = config_store.update_server(server_id, body)
+    updated = config_store.update_server(user_id, server_id, body)
     if not updated:
         return web.json_response({"error": "服务器不存在"}, status=404)
+    ssh_manager.close(server_id)  # 凭据/地址可能已变，丢弃旧连接
     return web.json_response({"server": updated})
 
 
 async def delete_server(request: web.Request) -> web.Response:
+    user_id = current_user_id(request)
     server_id = request.match_info["id"]
-    ssh_manager.close(server_id)
-    ok = config_store.delete_server(server_id)
+    ok = config_store.delete_server(user_id, server_id)
+    if ok:
+        ssh_manager.close(server_id)
     return web.json_response({"success": ok})
 
 
 async def test_server(request: web.Request) -> web.Response:
+    user_id = current_user_id(request)
     server_id = request.match_info["id"]
-    if not config_store.get_server_raw(server_id):
+    if not config_store.get_server_raw(user_id, server_id):
         return web.json_response({"error": "服务器不存在"}, status=404)
     result = await asyncio.to_thread(ssh_manager.test_connection, server_id)
     return web.json_response(result)
@@ -143,8 +150,9 @@ async def test_server(request: web.Request) -> web.Response:
 
 async def reset_host_key(request: web.Request) -> web.Response:
     """删除某服务器已记录的 SSH 主机指纹（对方重装系统后重置用）。"""
+    user_id = current_user_id(request)
     server_id = request.match_info["id"]
-    srv = config_store.get_server_raw(server_id)
+    srv = config_store.get_server_raw(user_id, server_id)
     if not srv:
         return web.json_response({"error": "服务器不存在"}, status=404)
     ssh_manager.close(server_id)
@@ -157,53 +165,68 @@ async def reset_host_key(request: web.Request) -> web.Response:
     })
 
 
-# LLM 配置
+# LLM 配置（按用户隔离）
 async def get_llm(request: web.Request) -> web.Response:
+    user_id = current_user_id(request)
+    raw = config_store.get_llm_config_raw(user_id)
     return web.json_response({
-        "llm": config_store.get_llm_config(),
-        "warnings": config_store.llm_warnings(),
+        "llm": config_store.get_llm_config(user_id),
+        "warnings": config_store.llm_warnings(raw),
     })
 
 
 async def update_llm(request: web.Request) -> web.Response:
+    user_id = current_user_id(request)
     body = await request.json()
     errs = config_store.validate_llm_updates(body)
     if errs:
         return web.json_response({"error": "；".join(errs)}, status=400)
-    result = config_store.update_llm_config(body)
-    return web.json_response({"llm": result, "warnings": config_store.llm_warnings()})
+    result = config_store.update_llm_config(user_id, body)
+    return web.json_response({
+        "llm": result,
+        "warnings": config_store.llm_warnings(config_store.get_llm_config_raw(user_id)),
+    })
 
 
 async def test_llm(request: web.Request) -> web.Response:
+    user_id = current_user_id(request)
     body = await request.json() if request.can_read_body else {}
-    result = await llm_client.test_connection(model=body.get("model"))
+    result = await llm_client.test_connection(user_id, model=body.get("model"))
     return web.json_response(result)
 
 
-# 会话
+# 会话（按用户隔离）
 async def list_sessions(request: web.Request) -> web.Response:
-    return web.json_response({"sessions": session_store.list_sessions()})
+    user_id = current_user_id(request)
+    return web.json_response({"sessions": session_store.list_sessions(user_id)})
 
 
 async def get_session(request: web.Request) -> web.Response:
+    user_id = current_user_id(request)
     sid = request.match_info["id"]
-    session = session_store.get_session(sid)
+    session = session_store.get_session(sid, user_id)
     if not session:
         return web.json_response({"error": "会话不存在"}, status=404)
     return web.json_response({"session": session})
 
 
 async def delete_session(request: web.Request) -> web.Response:
+    user_id = current_user_id(request)
     sid = request.match_info["id"]
-    ok = session_store.delete_session(sid)
+    ok = session_store.delete_session(sid, user_id)
     return web.json_response({"success": ok})
 
 
 async def create_session(request: web.Request) -> web.Response:
+    user_id = current_user_id(request)
     body = await request.json() if request.can_read_body else {}
+    server_id = body.get("server_id")
+    if server_id and not config_store.get_server_raw(user_id, str(server_id)):
+        return web.json_response({"error": "服务器不存在"}, status=400)
     session = session_store.create_session(
+        user_id,
         title=body.get("title", "新会话"),
-        server_id=body.get("server_id"),
+        server_id=server_id,
     )
     return web.json_response({"session": session})
 
@@ -233,6 +256,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
     manager = WSManager(ws)
+    user_id = current_user_id(request)  # 中间件已保证登录态；服务器/会话按此隔离
 
     async def emit(event: dict):
         await manager.emit(event)
@@ -262,15 +286,20 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     await emit({"type": "error", "message": "上一个任务仍在执行，请等待完成或先停止"})
                     continue
 
-                if session_id and not session_store.get_session(session_id):
+                # 服务器必须属于当前用户（多用户隔离）
+                if server_id and not session_store.get_server(str(server_id), user_id):
+                    await emit({"type": "error", "message": "服务器不存在或无权访问"})
+                    continue
+                # 会话必须属于当前用户
+                if session_id and not session_store.get_session(str(session_id), user_id):
                     await emit({"type": "error", "message": "会话不存在，已新建会话"})
                     session_id = None
                 if not session_id:
-                    session = session_store.create_session(server_id=server_id)
+                    session = session_store.create_session(user_id, server_id=server_id)
                     session_id = session["id"]
                 await emit({"type": "session_start", "session_id": session_id})
 
-                agent = AgentSession(session_id, emit, server_id, model=model)
+                agent = AgentSession(session_id, emit, server_id, model=model, user_id=user_id)
                 agent.load_history()
                 manager.agent = agent
                 # 异步执行 Agent，WebSocket 继续接收确认/取消消息

@@ -56,7 +56,7 @@ ShellPilot 启动: http://127.0.0.1:8765
 
 浏览器打开 http://127.0.0.1:8765 ，用上面的账号登录。忘记密码可在服务端执行 `python server/app.py --reset-password` 重置（旧密码与该账号所有登录会话立即失效）。登录后可在 **设置 → 账号安全** 里修改密码。
 
-**多用户**：登录页提供「注册新账号」入口（默认开放，可用配置 `auth.allow_registration` 关闭）。注册的用户与管理员相互独立——各自的会话、修改密码互不影响；所有账号都能管理同一份服务器列表与 LLM 配置。旧版本（密码存于 config.json）首次启动时自动迁移到用户表，原密码继续有效。
+**多用户**：登录页提供「注册新账号」入口（默认开放，可用配置 `auth.allow_registration` 关闭）。每个账号有**完全独立**的 LLM 配置、服务器列表、会话历史与密码——新注册用户从空白配置开始，自己填 API Key、添加自己的服务器；管理员看不到也不动别人的配置。旧版本（账号/LLM/服务器存于 config.json）首次启动时自动迁入数据库并划归管理员。
 
 > 完整的环境准备、数据库建库、后台常驻、停止/重启、备份恢复与故障排查，见 [DEPLOY.md](DEPLOY.md)。
 
@@ -78,8 +78,8 @@ shellpilot/
 │   ├── safety.py           # 命令安全分级（白名单/黑名单/绝对禁止）
 │   ├── ssh_manager.py      # SSH 连接池、命令执行、主机指纹校验（TOFU）
 │   ├── llm_client.py       # LLM 流式调用（OpenAI 协议）
-│   ├── config.py           # 配置读写（config.json）
-│   └── session.py          # PostgreSQL 会话与审计日志存储
+│   ├── config.py           # 注册开关/SSH 策略读写 + 每用户 LLM/服务器配置的业务层
+│   └── session.py          # PostgreSQL 存储：账号、每用户 LLM/服务器、会话与审计日志
 ├── web/                    # 前端（原生 HTML/CSS/JS，零构建）
 │   ├── index.html
 │   ├── css/style.css
@@ -95,18 +95,14 @@ shellpilot/
 
 ## 配置项
 
-`config.json` 由程序自动生成，也可直接编辑：
+`config.json` 只存全局选项；**LLM 配置与服务器列表已按用户存数据库**（设置页 / 服务器管理页修改），文件里的 `llm` / `servers` 两段仅在从旧版本升级时作为一次性迁移来源，迁移完成后自动清空：
 
 | 配置 | 说明 | 默认 |
 |---|---|---|
-| `llm.base_url` | OpenAI 协议接口地址（如 `https://api.deepseek.com/v1`） | `https://api.deepseek.com/v1` |
-| `llm.api_key` | API 密钥 | 空 |
-| `llm.model` | 兜底/默认模型名，如 `deepseek-chat` | `deepseek-chat` |
-| `llm.models` | 可选模型列表；对话页下拉框据此切换 | `[]` |
-| `llm.timeout` | 请求超时秒 | `120` |
-| `llm.history_budget_chars` | 回灌模型的历史字符上限，`0` = 全量发送 | `0` |
 | `auth.allow_registration` | 是否开放注册（登录页显示注册入口；`false` 时仅管理员在服务端建号） | `true` |
 | `ssh.host_key_policy` | SSH 主机指纹校验：`tofu`（首次记录，变更拒绝）/ `strict` / `auto`（不校验） | `tofu` |
+
+每用户的 LLM 配置（`base_url` / `api_key` / `model` / `models` / `timeout` / `history_budget_chars`）与服务器列表字段含义不变，只是存储位置从 config.json 移到了数据库的 `user_llm` / `servers` 表，且每个用户各一份。
 
 > 温度、max_tokens、迭代轮次等 Agent 内部参数已固化为代码常量（`server/agent.py`、`server/llm_client.py`），不作为配置暴露。API Key 留空或 `********` 保存表示不修改原密钥。
 
@@ -114,12 +110,15 @@ shellpilot/
 
 ## 数据库
 
-会话与消息存于 PostgreSQL 的 `shellpilot` 库（首次启动自动建库表），两张表：
+账号、每用户的 LLM/服务器配置、会话与消息都存于 PostgreSQL 的 `shellpilot` 库（首次启动自动建表）：
 
-- `sessions`：会话元数据（id / 标题 / 目标服务器 / 时间戳）
+- `users`：登录账号（用户名 / PBKDF2 密码哈希 / 最后登录时间）
+- `servers`：每用户自己的服务器列表（含 SSH 凭据，按 `user_id` 隔离）
+- `user_llm`：每用户自己的 LLM 配置（Base URL / API Key / 模型，按 `user_id` 隔离）
+- `sessions`：会话元数据（id / 归属用户 / 标题 / 目标服务器 / 时间戳）
 - `messages`：每条消息与命令审计（角色 / 内容 / 工具参数 / 命令输出 / 退出码 / 风险等级 / 时间戳），按 `seq` 排序保存，支持完整回放
 
-> `config.json`（服务器凭据 + LLM Key）仍是本地文件；数据库只存对话和命令日志。两者都不要外传。
+> 旧版本把服务器凭据和 LLM Key 存在 `config.json`；升级后首次启动会自动把它们迁入数据库（管理员名下），`config.json` 中随即清除。SSH 密码 / 私钥 / LLM Key 从此只存数据库，前端接口返回时一律脱敏。
 
 ## AI 可用的工具
 
@@ -155,7 +154,7 @@ SHELLPILOT_PASSWORD=test1234 python tests/test_integration.py
 **认证与访问控制**（`server/auth.py`）：
 
 - **登录认证**：账号存于 PostgreSQL `users` 表，首次启动 users 表为空时自动创建管理员（用户名默认 `admin`，密码随机生成、PBKDF2 加密存储、明文只打印一次；也可用 `SHELLPILOT_PASSWORD` 指定）。所有 API、WebSocket 与静态资源都要求登录会话；`/api/health`、登录/注册页除外（不返回敏感数据）
-- **注册与多用户**：登录页「注册新账号」默认开放（`auth.allow_registration: false` 可关闭，关闭后注册页仍可见但无法提交）。各账号会话与密码相互独立，修改密码只注销自己的其他会话；服务器列表与 LLM 配置为全局共享。**公网部署建议关闭注册**，避免陌生人自行注册后使用你的 LLM Key 与服务器凭据
+- **注册与多用户**：登录页「注册新账号」默认开放（`auth.allow_registration: false` 可关闭，关闭后注册页仍可见但无法提交）。各账号的**LLM 配置、服务器列表、会话历史完全按用户隔离**——注册用户看到的是空白配置，需要自己填 API Key、添加服务器；密码与会话也相互独立，修改密码只注销自己的其他会话。Agent 执行工具前会校验服务器归属，无法操作别人的服务器。**公网部署建议关闭注册**
 - **会话管理**：登录成功下发 HttpOnly + SameSite=Strict 会话 Cookie（30 天滑动过期）；脚本可改用 `Authorization: Bearer <会话令牌>`。退出登录立即失效；修改密码注销该账号的其他会话
 - **CSWSH 防护**：带 `Origin` 的 WebSocket 握手必须同源，恶意网页无法借你的浏览器劫持本机 WS 执行命令
 - **CSRF 防护**：带 `Origin` 的写请求（POST/PUT/DELETE，含登录接口）必须同源，拦截"简单请求"式跨站调用
@@ -166,7 +165,7 @@ SHELLPILOT_PASSWORD=test1234 python tests/test_integration.py
 
 **其他**：
 
-- SSH 密码 / 私钥 / LLM Key 只存于服务端 `config.json`，前端接口返回时脱敏
+- SSH 密码 / 私钥 / LLM Key 只存于 PostgreSQL 数据库（按用户隔离的 `servers` / `user_llm` 表），前端接口返回时脱敏；一次性迁移后 `config.json` 不再含任何密钥
 - 危险操作确认有 300 秒超时，超时自动取消
 - 所有执行过的命令与输出都持久化在 PostgreSQL，可审计回查
 - 安全分级是**规则白名单制**：不在白名单内的命令一律要求确认（宁可多问，不可误执行）

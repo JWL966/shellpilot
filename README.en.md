@@ -60,7 +60,7 @@ ShellPilot 启动: http://127.0.0.1:8765
 
 Open http://127.0.0.1:8765 in a browser and sign in with those credentials. Forgot the password? Run `python server/app.py --reset-password` on the server (the old password and that account's sessions are invalidated immediately). You can change the password in **Settings → 账号安全** after logging in.
 
-**Multi-user**: the login page has a "register" link (open by default; disable via `auth.allow_registration`). Registered users are independent from the admin — separate sessions, separate password changes — but everyone shares the same server list and LLM config. Upgrading from an old version (password stored in config.json) migrates the admin into the users table automatically; the old password keeps working.
+**Multi-user**: the login page has a "register" link (open by default; disable via `auth.allow_registration`). Each account has **fully isolated** LLM config, server list, chat history and password — a newly registered user starts blank and enters their own API key and servers; the admin cannot see or touch other users' data. Legacy single-user data (account/LLM/servers in config.json) migrates into the database automatically on first start and is assigned to the admin.
 
 > Detailed setup, background/service running, stop & restart, backup and troubleshooting: [DEPLOY.md](DEPLOY.md) (Chinese).
 
@@ -82,8 +82,8 @@ shellpilot/
 │   ├── safety.py           # command risk classification (allow / deny / forbid)
 │   ├── ssh_manager.py      # SSH connection pool, command execution, host-key pinning (TOFU)
 │   ├── llm_client.py       # streaming LLM client (OpenAI protocol)
-│   ├── config.py           # config.json read/write
-│   └── session.py          # PostgreSQL session and audit-log storage
+│   ├── config.py           # registration/SSH-policy options + per-user LLM/server business logic
+│   └── session.py          # PostgreSQL storage: accounts, per-user LLM/servers, sessions & audit log
 ├── web/                    # frontend (plain HTML/CSS/JS, no build step)
 │   ├── index.html
 │   ├── css/style.css
@@ -100,18 +100,14 @@ shellpilot/
 
 ## Configuration
 
-`config.json` is created on first run and can also be edited by hand:
+`config.json` holds only global options; **LLM config and the server list are stored per user in the database** (edited via the Settings / Servers pages). The `llm` / `servers` sections in the file are a one-time migration source when upgrading from an older version, and are cleared after migration:
 
 | Key | Meaning | Default |
 |---|---|---|
-| `llm.base_url` | OpenAI-compatible endpoint (e.g. `https://api.deepseek.com/v1`) | `https://api.deepseek.com/v1` |
-| `llm.api_key` | API key | empty |
-| `llm.model` | fallback/default model name, e.g. `deepseek-chat` | `deepseek-chat` |
-| `llm.models` | selectable models shown in the chat dropdown | `[]` |
-| `llm.timeout` | request timeout in seconds | `120` |
-| `llm.history_budget_chars` | max characters of history replayed to the model; `0` = send everything | `0` |
 | `auth.allow_registration` | whether open registration is enabled (shows the register link; `false` = only the admin creates accounts server-side) | `true` |
 | `ssh.host_key_policy` | SSH host-key policy: `tofu` (pin on first connect, reject on change) / `strict` / `auto` (no check) | `tofu` |
+
+Per-user LLM settings (`base_url` / `api_key` / `model` / `models` / `timeout` / `history_budget_chars`) and the server-list fields keep their meaning — they just moved from config.json into the `user_llm` / `servers` tables, one copy per user.
 
 > Agent internals such as temperature, max_tokens and iteration count are constants in `server/agent.py` and `server/llm_client.py`, not settings. Saving an empty or `********` API key leaves the stored key unchanged.
 
@@ -119,12 +115,15 @@ Environment variables: `SHELLPILOT_CONFIG` (config file path), `SHELLPILOT_PG_DS
 
 ## Database
 
-Sessions and messages live in the `shellpilot` database in two tables:
+Accounts, per-user LLM/server config, sessions and messages all live in the `shellpilot` database (tables are created on first start):
 
-- `sessions` — metadata (id, title, target server, timestamps)
+- `users` — login accounts (username / PBKDF2 password hash / last login)
+- `servers` — each user's own server list (including SSH credentials, isolated by `user_id`)
+- `user_llm` — each user's own LLM config (base URL / API key / models, isolated by `user_id`)
+- `sessions` — metadata (id, owner, title, target server, timestamps)
 - `messages` — every message plus command audit data (role, content, tool arguments, output, exit code, risk level, timestamp), ordered by `seq` for full replay
 
-> `config.json` (server credentials + LLM key) stays a local file; the database only holds conversations and command logs. Don't share either of them.
+> Older versions kept server credentials and the LLM key in `config.json`; on first start after upgrading they are migrated into the database (under the admin account) and removed from the file. SSH passwords / keys and the LLM key now live only in the database; API responses always mask them.
 
 ## Tools available to the agent
 
@@ -161,7 +160,7 @@ SHELLPILOT_PASSWORD=test1234 python tests/test_integration.py
 **Authentication & access control** (`server/auth.py`):
 
 - **Login auth**: accounts live in the PostgreSQL `users` table; when it is empty on first start an admin account is created (default name `admin`) with a random password stored as a PBKDF2 hash — the plaintext is printed exactly once (or set `SHELLPILOT_PASSWORD` beforehand). Every API call, WebSocket handshake and static asset requires an authenticated session; only `/api/health` and the login/register pages are open (neither returns sensitive data)
-- **Registration & multi-user**: the "register" link on the login page is enabled by default (`auth.allow_registration: false` turns it off; the register page then stays visible but rejects submissions). Each account has its own sessions and password; changing a password only drops that account's other sessions. The server list and LLM config are shared globally. **For public deployments, disable registration** so strangers cannot sign up and spend your LLM key / reuse your stored server credentials
+- **Registration & multi-user**: the "register" link on the login page is enabled by default (`auth.allow_registration: false` turns it off; the register page then stays visible but rejects submissions). Each account's **LLM config, server list and chat history are fully isolated per user** — a new user starts blank with their own API key and servers; sessions and passwords are independent too, and changing a password only drops that account's other sessions. The agent verifies server ownership before running any tool. **For public deployments, disable registration**
 - **Sessions**: login sets an HttpOnly + SameSite=Strict session cookie (30-day sliding expiry); scripts can use `Authorization: Bearer <session token>` instead. Logout invalidates the session immediately; changing the password drops that account's other sessions
 - **CSWSH protection**: WebSocket handshakes carrying an `Origin` must be same-origin — a malicious web page can no longer hijack your browser's connection to the local WS and run commands through the agent
 - **CSRF protection**: state-changing requests (POST/PUT/DELETE, including the login endpoint itself) carrying an `Origin` must be same-origin, blocking cross-site "simple requests"
@@ -172,7 +171,7 @@ SHELLPILOT_PASSWORD=test1234 python tests/test_integration.py
 
 **Other**:
 
-- SSH passwords / keys and the LLM key are stored only server-side in `config.json`; API responses mask them
+- SSH passwords / keys and the LLM key are stored only in the PostgreSQL database (per user, `servers` / `user_llm` tables); API responses mask them. `config.json` holds no secrets after the one-time migration
 - Confirming a dangerous command times out after 300 seconds and cancels itself
 - Every command and its output is persisted in PostgreSQL for audit
 - Classification is an **allow-list**: anything not explicitly read-only requires confirmation — ask too often rather than run once too many

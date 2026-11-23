@@ -57,10 +57,13 @@ def ensure_test_db():
 
 
 def reset_test_users():
-    """测试库跨运行持久，先清空用户表保证用例确定性（admin 由 reset_password 重建）。"""
+    """测试库跨运行持久，先清空用户相关表保证用例确定性（admin 由 reset_password 重建）。"""
     import psycopg
     with psycopg.connect(os.environ["SHELLPILOT_PG_DSN"], autocommit=True) as conn:
-        conn.execute("DELETE FROM users")
+        conn.execute("DELETE FROM users")       # servers/user_llm 有 FK 级联
+        conn.execute("DELETE FROM sessions")    # sessions.user_id 无 FK，需单独清
+        conn.execute("DELETE FROM servers")
+        conn.execute("DELETE FROM user_llm")
 
 
 def check(name, cond, detail=""):
@@ -239,6 +242,43 @@ async def main() -> int:
         r = await login(client, "alice", "wrong-pass-999")
         ok &= check("新用户错误密码 -> 401", r.status == 401, str(r.status))
 
+        # ---- 多用户数据隔离：LLM 配置 / 服务器 / 会话均按用户隔离 ----
+        r = await client.get("/api/servers")
+        ok &= check("新用户服务器列表为空（看不到 admin 的）",
+                    r.status == 200 and (await r.json()).get("servers") == [], str(r.status))
+        r = await client.get("/api/config/llm")
+        alice_llm = (await r.json())["llm"]
+        ok &= check("新用户 LLM 配置为默认模板（与 admin 互不可见）",
+                    alice_llm.get("base_url") == "https://api.deepseek.com/v1"
+                    and alice_llm.get("has_api_key") is False, str(alice_llm))
+        r = await client.put("/api/config/llm", json={"base_url": "http://203.0.113.5:9999/v1"})
+        ok &= check("alice 保存自己的 LLM 配置 -> 200", r.status == 200, f"{r.status} {await r.text()}")
+        r = await client.get("/api/config/llm")
+        ok &= check("alice 读回自己的 base_url",
+                    (await r.json())["llm"].get("base_url") == "http://203.0.113.5:9999/v1", str(r.status))
+        r = await client.post("/api/servers",
+                              json={"name": "alice 的服务器", "host": "192.0.2.9",
+                                    "port": 22, "username": "alice", "password": "x",
+                                    "auth_type": "password"})
+        ok &= check("alice 添加自己的服务器 -> 200", r.status == 200, f"{r.status} {await r.text()}")
+        r = await client.get("/api/servers")
+        alice_servers = (await r.json()).get("servers") or []
+        ok &= check("alice 的列表只有自己的服务器", len(alice_servers) == 1, str(alice_servers))
+        # alice 访问 admin 的服务器（越权）-> 404
+        r = await client.put(f"/api/servers/{created_server_id}", json={"name": "夺舍"})
+        ok &= check("alice 改 admin 的服务器 -> 404", r.status == 404, str(r.status))
+        r = await client.post(f"/api/servers/{created_server_id}/test")
+        ok &= check("alice 测 admin 的服务器 -> 404", r.status == 404, str(r.status))
+        r = await client.delete(f"/api/servers/{created_server_id}")
+        ok &= check("alice 删 admin 的服务器 -> success=false", r.status == 200
+                    and (await r.json()).get("success") is False, str(r.status))
+        # 会话隔离
+        r = await client.post("/api/sessions", json={"title": "alice 的会话"})
+        alice_sid = (await r.json()).get("session", {}).get("id")
+        r = await client.get("/api/sessions")
+        sids = [s["id"] for s in (await r.json()).get("sessions") or []]
+        ok &= check("alice 的会话列表只有自己的", sids == [alice_sid], str(sids))
+
         # 多用户会话隔离：admin 在独立会话里改密码，不影响 alice 的会话
         cookies = client.session.cookie_jar.filter_cookies(client.make_url("/"))
         alice_bearer = cookies["sp_session"].value if "sp_session" in cookies else None
@@ -287,6 +327,21 @@ async def main() -> int:
         # ---- 修改密码（admin，alice 会话已验证隔离）----
         r = await login(client, "admin", "admin-new-pw-8888")
         ok &= check("admin 新密码登录 -> 200", r.status == 200, str(r.status))
+        r = await client.get("/api/config/llm")
+        admin_llm = (await r.json())["llm"]
+        ok &= check("admin 的 LLM 配置未被 alice 影响",
+                    admin_llm.get("base_url") == "http://198.51.100.9:3000/v1",
+                    str(admin_llm))
+        r = await client.get("/api/servers")
+        admin_servers = (await r.json()).get("servers") or []
+        ok &= check("admin 的服务器列表不含 alice 的",
+                    len(admin_servers) == 1 and admin_servers[0]["id"] == created_server_id,
+                    str(admin_servers))
+        r = await client.get(f"/api/sessions/{alice_sid}")
+        ok &= check("admin 读 alice 的会话 -> 404", r.status == 404, str(r.status))
+        r = await client.get("/api/sessions")
+        admin_sids = [s["id"] for s in (await r.json()).get("sessions") or []]
+        ok &= check("admin 的会话列表不含 alice 的", alice_sid not in admin_sids, str(admin_sids))
         r = await client.post("/api/auth/password",
                               json={"old_password": "admin-new-pw-8888", "new_password": "admin-final-9999"})
         ok &= check("admin 再次修改密码 -> 200", r.status == 200, str(r.status))

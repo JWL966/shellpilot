@@ -114,7 +114,13 @@ ShellPilot 启动: http://127.0.0.1:8765
 浏览器打开上面地址登录使用。忘记密码: python server/app.py --reset-password
 ```
 
-旧版本升级（config.json 里存有 `auth.username` / `auth.password_hash`）会打印「已把旧版管理员账号迁移到数据库用户表，原密码继续有效」，账号密码原样迁入 users 表，无需重置。
+旧版本升级（config.json 里存有 `auth.username` / `auth.password_hash`）会打印「已把旧版管理员账号迁移到数据库用户表，原密码继续有效」，账号密码原样迁入 users 表，无需重置。若 config.json 里还有旧版 `llm` 配置或 `servers` 列表，会看到类似下面的迁移输出（迁给管理员，随后从文件清除）：
+
+```
+已把 2 条历史会话划归管理员账号
+已把旧版 config.json 里的 1 台服务器迁入数据库（管理员名下），config.json 中已清除
+已把旧版 config.json 里的 LLM 配置迁入数据库（管理员名下），config.json 中已清除
+```
 
 此时前台阻塞：**关闭终端 = 停止服务**。需要常驻见第 6 节。
 
@@ -144,29 +150,17 @@ curl -s -b cookies.txt http://127.0.0.1:8765/api/config/llm
 2. **服务器管理** 页添加 Linux 主机 →「测试连接」确认 SSH 可达（首次连接会记录主机指纹）
 3. **对话** 页选择目标服务器与模型 → 提问
 
-**多用户注册**：登录页右下有「注册新账号」入口，默认开放。给同事开账号直接让他们自助注册即可；不想对外开放时，把 `config.json` 里 `auth.allow_registration` 改为 `false` 并重启（登录页的注册入口随之隐藏）。所有账号共用服务器列表与 LLM 配置，会话与密码相互独立。**公网部署务必关闭注册。**
+**多用户注册**：登录页右下有「注册新账号」入口，默认开放。给同事开账号直接让他们自助注册即可；不想对外开放时，把 `config.json` 里 `auth.allow_registration` 改为 `false` 并重启（登录页的注册入口随之隐藏）。每个账号的 **LLM 配置、服务器列表、会话历史完全按用户隔离**——新用户从空白配置开始，自己填 API Key、加自己的服务器；密码与会话也相互独立。Agent 执行命令前会校验服务器归属，无法操作别人的服务器。**公网部署务必关闭注册。**
 
 ---
 
 ## 3. 配置说明
 
-配置存在项目根目录的 `config.json`（**含密钥，不要提交、不要外传**）。
+`config.json` 只存全局选项（注册开关、SSH 指纹策略）；**LLM 配置与服务器列表已按用户隔离存入数据库**（在设置页 / 服务器管理页修改）。文件里遗留的 `llm` / `servers` 两段仅在旧版本升级时作为一次性迁移来源（迁给管理员），迁移完成后自动清空，**文件不再含任何密钥**。
 
-### 3.1 LLM 配置
+### 3.1 LLM 配置（每用户一份，存数据库 `user_llm` 表）
 
-```json
-{
-  "llm": {
-    "base_url": "https://api.deepseek.com/v1",
-    "api_key": "sk-...",
-    "model": "deepseek-chat",
-    "models": ["deepseek-chat", "deepseek-reasoner"],
-    "timeout": 300,
-    "history_budget_chars": 0
-  },
-  "servers": []
-}
-```
+字段含义不变，在 **设置** 页修改（`server/config.py` 业务层 + `server/session.py` 存储）：
 
 | 字段 | 说明 |
 |---|---|
@@ -176,6 +170,8 @@ curl -s -b cookies.txt http://127.0.0.1:8765/api/config/llm
 | `models` | 对话页「使用模型」下拉框的候选列表 |
 | `timeout` | 单次 LLM 请求超时（秒），范围 10～600 |
 | `history_budget_chars` | 历史上下文字符上限；**0 = 不裁剪**（大上下文模型推荐），正数则超限后按整轮丢弃最旧内容 |
+
+服务器列表同理，每用户一份（`servers` 表，含 SSH 凭据，接口返回时脱敏）。注册的新用户看到的是空白配置，需要自己填写——互不可见、互不影响。
 
 ### 3.2 上下文（历史消息）策略
 
@@ -417,12 +413,15 @@ Linux 下如果要监听局域网，同样改 `server/app.py` 的 `host`，或�
 
 ### 7.1 表结构
 
-启动时自动创建（`server/session.py:25` 的 `SCHEMA`，由 `init_db()` 在 60 行执行）：
+启动时自动创建（`server/session.py` 的 `SCHEMA`，由 `init_db()` 执行）：
 
-- `sessions`：会话（`id / title / server_id / created_at / updated_at`）
+- `users`：登录账号（`id / username / password_hash / created_at / last_login_at`）
+- `servers`：每用户的服务器列表（`id / user_id / host / port / username / auth_type / password / key_path / key_content / ...`，按 `user_id` 隔离）
+- `user_llm`：每用户的 LLM 配置（`user_id / base_url / api_key / model / models / timeout / history_budget_chars`）
+- `sessions`：会话（`id / user_id / title / server_id / created_at / updated_at`）
 - `messages`：消息与命令审计（`session_id / seq / role / content / tool_call_id / name / arguments / result / exit_code / success / risk / ts / extra`）
 
-> 注意：`CREATE TABLE IF NOT EXISTS` **不会给已存在的表补新列**。如果以后升级版本改了表结构，需要手工 `ALTER TABLE` 或迁移（升级前先备份）。
+> 注意：`CREATE TABLE IF NOT EXISTS` **不会给已存在的表补新列**。本次多用户升级用的 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`（sessions 补 user_id）会自动执行；此后若再改表结构，需手工 `ALTER TABLE` 或迁移（升级前先备份）。
 
 ### 7.2 备份 / 恢复
 
@@ -436,7 +435,7 @@ Linux 下如果要监听局域网，同样改 `server/app.py` 的 `host`，或�
   -d shellpilot -c "E:/backup/shellpilot_20261123_1200.dump"
 ```
 
-> 备份文件同样含命令输出与可能出现的敏感信息，按敏感数据管理。
+> **数据库现在包含全部敏感数据**：SSH 密码/私钥（`servers` 表）、LLM API Key（`user_llm` 表）与命令输出。迁移完成后 `config.json` 不再含密钥，备份文件按敏感数据管理（限权限、不外传）。
 
 ### 7.3 清理历史会话
 
@@ -493,7 +492,7 @@ SHELLPILOT_PASSWORD=test1234 python tests/test_integration.py   # 终端 B
 - **全程不读写真实 API Key**（不传 `api_key` 字段）
 - 自己创建的测试服务器与会话会在结束时删除
 
-⚠️ 若测试进程中途被杀，配置可能停留在 Mock 地址。恢复方法：在「设置」页重新保存一次正确 Base URL / 模型（密钥回显 `********` 会保持不变），或直接编辑 `config.json`。
+⚠️ 若测试进程中途被杀，配置可能停留在 Mock 地址。恢复方法：在「设置」页重新保存一次正确 Base URL / 模型（密钥回显 `********` 会保持不变）。LLM 配置存数据库（`user_llm` 表），改 `config.json` 无效。
 
 ---
 
@@ -567,7 +566,7 @@ SSH 连接失败: ...
 1. 备份：`config.json` + 数据库（见 7.2）
 2. 拉取/覆盖代码（保持 `web/`、`server/`、`tests/` 目录结构）
 3. 更新依赖：`pip install -r requirements.txt`
-4. 若有表结构变更：按变更说明执行 `ALTER TABLE`
+4. 若有表结构变更：按变更说明执行 `ALTER TABLE`（本次多用户升级的 sessions 补列 / 新建 servers、user_llm 表会自动完成）
 5. 重启服务（第 5.3 节）
 6. 验证：`/api/health`、设置页「测试连接」、发一条只读排查消息
 
@@ -577,15 +576,16 @@ SSH 连接失败: ...
 
 ## 11. 安全检查清单
 
-- [ ] `config.json` 不入库、不外传，权限仅限服务账号可读（内含服务器凭据、LLM Key；登录密码哈希在数据库 users 表）
+- [ ] `config.json` 不入库、不外传，权限仅限服务账号可读（迁移后只含注册开关/SSH 策略，无密钥）
+- [ ] **数据库按敏感数据管理**：SSH 凭据、LLM API Key、密码哈希、命令输出都在库里，限权限、不外传
 - [ ] 首次启动后立即登录并修改随机密码（设置 → 账号安全）
-- [ ] 公网部署关闭注册：`config.json` 里 `auth.allow_registration: false`，避免陌生人自助注册使用你的 LLM Key 与服务器凭据
+- [ ] 公网部署关闭注册：`config.json` 里 `auth.allow_registration: false`（虽然各用户数据已隔离，仍避免陌生人乱注册）
 - [ ] 服务只监听 `127.0.0.1`；公网访问必须走反代 + HTTPS（登录认证已内置）
 - [ ] 数据库使用专用账号（非 `postgres` 超级用户）并限制来源
 - [ ] SSH 使用最小权限账号（不建议 root），保持主机指纹 TOFU 校验开启
 - [ ] 危险操作确认机制保持开启（默认 300 秒超时自动取消）
 - [ ] 定期清理/归档历史会话；备份文件按敏感数据保管
-- [ ] 变更前先备份 `config.json` 与数据库
+- [ ] 变更前先备份数据库（见 7.2）
 
 ---
 

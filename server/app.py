@@ -85,7 +85,12 @@ if __name__ == "__main__":
         print("已把旧版管理员账号迁移到数据库用户表，原密码继续有效", flush=True)
     elif os.environ.get("SHELLPILOT_PASSWORD", "").strip():
         print("管理员初始密码来自环境变量 SHELLPILOT_PASSWORD", flush=True)
+    # 旧版单用户数据（config.json 的 llm/servers、无主会话）→ 数据库按用户隔离
+    for msg in config_store.migrate_legacy_data():
+        print(msg, flush=True)
     print("浏览器打开上面地址登录使用。忘记密码: python server/app.py --reset-password", flush=True)
-    for w in config_store.llm_warnings():
+    admin_id = config_store.admin_user_id()
+    for w in config_store.llm_warnings(
+            config_store.get_llm_config_raw(admin_id) if admin_id is not None else None):
         print(f"[配置告警] {w}", flush=True)
     web.run_app(create_app(), host=host, port=port, print=None)

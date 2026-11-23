@@ -28,7 +28,7 @@ class MockLLM:
         self.script = script  # list of turns
         self.i = 0
 
-    async def chat_stream(self, messages, tools=None, model=None):
+    async def chat_stream(self, user_id, messages, tools=None, model=None):
         self.last_model = model
         if self.i >= len(self.script):
             yield {"type": "content", "delta": "（脚本结束）"}
@@ -50,17 +50,17 @@ class MockSSH:
         return {"exit_code": 0, "stdout": f"[mock output for: {cmd}]", "stderr": "", "duration_ms": 5}
 
 
+TEST_USER_ID: int | None = None
+
+
 def setup_env():
-    # 用临时 config（隔离真实配置）
+    global TEST_USER_ID
+    # 用临时 config（隔离真实配置；llm/servers 已迁入数据库，config 只剩 auth/ssh 选项）
     os.environ["SHELLPILOT_CONFIG"] = os.path.join(HERE, "test_config.json")
     config_store.CONFIG_PATH = os.environ["SHELLPILOT_CONFIG"]
     if os.path.exists(config_store.CONFIG_PATH):
         os.remove(config_store.CONFIG_PATH)
     cfg = json.loads(json.dumps(config_store.DEFAULT_CONFIG))
-    cfg["servers"] = [{
-        "id": "srv1", "name": "测试服务器", "host": "10.0.0.1", "port": 22,
-        "username": "root", "password": "x", "auth_type": "password",
-    }]
     with open(config_store.CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False)
 
@@ -68,6 +68,17 @@ def setup_env():
     os.environ["SHELLPILOT_PG_DSN"] = "host=127.0.0.1 port=5432 dbname=shellpilot_test user=postgres password=123456"
     session_store.DSN = os.environ["SHELLPILOT_PG_DSN"]
     session_store._initialized = False
+
+    # 测试用户 + 其名下的测试服务器（服务器已按用户隔离，Agent 只能操作本人服务器）
+    user = session_store.get_user_by_name("agent-test")
+    if not user:
+        user = session_store.create_user("agent-test", "not-a-real-password")
+    TEST_USER_ID = int(user["id"])
+    session_store.delete_server("srv1", TEST_USER_ID)
+    session_store.create_server(TEST_USER_ID, {
+        "id": "srv1", "name": "测试服务器", "host": "10.0.0.1", "port": 22,
+        "username": "root", "password": "x", "auth_type": "password",
+    })
 
     agent_mod.ssh_manager = MockSSH()
 
@@ -88,8 +99,8 @@ async def test_safe_command_flow():
         {"content": ["## 现象\nnginx 正常运行。"]},
     ])
     agent_mod.llm_client = mock
-    sess = session_store.create_session(title="t1", server_id="srv1")
-    ag = agent_mod.AgentSession(sess["id"], emit, "srv1", model="test-model")
+    sess = session_store.create_session(TEST_USER_ID, title="t1", server_id="srv1")
+    ag = agent_mod.AgentSession(sess["id"], emit, "srv1", model="test-model", user_id=TEST_USER_ID)
     ag.load_history()
     await ag.run("检查 nginx", "srv1")
 
@@ -118,8 +129,8 @@ async def test_dangerous_requires_confirm():
         {"content": ["好的，未重启。"]},
     ])
     agent_mod.llm_client = mock
-    sess = session_store.create_session(title="t2", server_id="srv1")
-    ag = agent_mod.AgentSession(sess["id"], emit, "srv1")
+    sess = session_store.create_session(TEST_USER_ID, title="t2", server_id="srv1")
+    ag = agent_mod.AgentSession(sess["id"], emit, "srv1", user_id=TEST_USER_ID)
     ag.load_history()
 
     async def approve_later():
@@ -154,8 +165,8 @@ async def test_forbidden_blocked():
         {"content": ["无法执行该命令。"]},
     ])
     agent_mod.llm_client = mock
-    sess = session_store.create_session(title="t3", server_id="srv1")
-    ag = agent_mod.AgentSession(sess["id"], emit, "srv1")
+    sess = session_store.create_session(TEST_USER_ID, title="t3", server_id="srv1")
+    ag = agent_mod.AgentSession(sess["id"], emit, "srv1", user_id=TEST_USER_ID)
     ag.load_history()
     await ag.run("删库", "srv1")
 
@@ -178,8 +189,8 @@ async def test_max_iterations():
                       "tool_calls": [{"id": f"x{i}", "name": "run_command",
                                       "arguments": json.dumps({"cmd": "df -h"})}]})
     agent_mod.llm_client = MockLLM(turns)
-    sess = session_store.create_session(title="t4", server_id="srv1")
-    ag = agent_mod.AgentSession(sess["id"], emit, "srv1")
+    sess = session_store.create_session(TEST_USER_ID, title="t4", server_id="srv1")
+    ag = agent_mod.AgentSession(sess["id"], emit, "srv1", user_id=TEST_USER_ID)
     ag.load_history()
     await ag.run("一直跑", "srv1")
 
@@ -203,8 +214,8 @@ async def test_high_level_tools():
         {"content": ["完成"]},
     ])
     agent_mod.llm_client = mock
-    sess = session_store.create_session(title="t5", server_id="srv1")
-    ag = agent_mod.AgentSession(sess["id"], emit, "srv1")
+    sess = session_store.create_session(TEST_USER_ID, title="t5", server_id="srv1")
+    ag = agent_mod.AgentSession(sess["id"], emit, "srv1", user_id=TEST_USER_ID)
     ag.load_history()
     await ag.run("检查", "srv1")
 
@@ -242,7 +253,7 @@ if __name__ == "__main__":
         import psycopg as _pg
         with _pg.connect(os.environ["SHELLPILOT_PG_DSN"]) as _c:
             with _c.cursor() as _cur:
-                _cur.execute("TRUNCATE TABLE sessions, messages RESTART IDENTITY CASCADE")
+                _cur.execute("TRUNCATE TABLE sessions, messages, servers RESTART IDENTITY CASCADE")
         cfg_path = os.path.join(HERE, "test_config.json")
         if os.path.exists(cfg_path):
             os.remove(cfg_path)

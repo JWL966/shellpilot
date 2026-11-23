@@ -1,11 +1,14 @@
-"""会话与消息审计日志：PostgreSQL 存储（替代原 JSON 文件）。
+"""会话与消息审计日志 + 多用户数据隔离：PostgreSQL 存储。
 
 表结构：
-  sessions  — 会话（id, title, server_id, created_at, updated_at）
+  sessions  — 会话（id, user_id, title, server_id, created_at, updated_at）
   messages  — 消息/审计（id, session_id, seq, role, content, tool_call_id, name,
                arguments, result, exit_code, success, risk, ts, extra）
-
-对外 API 与原 session.py 保持一致，调用方无需改动。
+  users     — 登录账号（id, username, password_hash, created_at, last_login_at）
+  servers   — 每用户的服务器列表（id, user_id, name, host, port, username,
+               auth_type, password, passphrase, key_path, key_content, os, extra）
+  user_llm  — 每用户的 LLM 配置（user_id, base_url, api_key, model, models,
+               timeout, history_budget_chars）
 """
 import json
 import os
@@ -56,6 +59,38 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     created_at    DOUBLE PRECISION NOT NULL,
     last_login_at DOUBLE PRECISION
+);
+-- 旧库升级：sessions 补 user_id 列（历史会话随后由启动迁移划给管理员）
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id INTEGER;
+-- 每用户的服务器列表（凭据入库存放；迁移自旧版 config.json）
+CREATE TABLE IF NOT EXISTS servers (
+    id          TEXT PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL DEFAULT '',
+    host        TEXT NOT NULL DEFAULT '',
+    port        INTEGER NOT NULL DEFAULT 22,
+    username    TEXT NOT NULL DEFAULT '',
+    auth_type   TEXT NOT NULL DEFAULT 'password',
+    password    TEXT,
+    passphrase  TEXT,
+    key_path    TEXT,
+    key_content TEXT,
+    os          TEXT,
+    extra       JSONB,
+    created_at  DOUBLE PRECISION NOT NULL,
+    updated_at  DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_servers_user ON servers(user_id);
+-- 每用户的 LLM 配置（迁移自旧版 config.json）
+CREATE TABLE IF NOT EXISTS user_llm (
+    user_id              INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    base_url             TEXT NOT NULL DEFAULT '',
+    api_key              TEXT NOT NULL DEFAULT '',
+    model                TEXT NOT NULL DEFAULT '',
+    models               JSONB NOT NULL DEFAULT '[]',
+    timeout              INTEGER NOT NULL DEFAULT 120,
+    history_budget_chars BIGINT NOT NULL DEFAULT 0,
+    updated_at           DOUBLE PRECISION NOT NULL
 );
 """
 
@@ -135,9 +170,195 @@ def touch_last_login(user_id: int) -> None:
                         (time.time(), user_id))
 
 
+# ---------- 服务器（按用户隔离）----------
+
+# servers 表的固定列；其余字段收进 extra JSONB
+_SERVER_COLS = ("name", "host", "port", "username", "auth_type",
+                "password", "passphrase", "key_path", "key_content", "os")
+
+
+def _server_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
+    d: dict[str, Any] = {"id": row["id"]}
+    for k in _SERVER_COLS:
+        if row.get(k) is not None:
+            d[k] = row[k]
+    if row.get("extra"):
+        d.update(row["extra"])
+    return d
+
+
+def count_servers() -> int:
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM servers")
+            return int(cur.fetchone()["n"])
+
+
+def list_servers(user_id: int) -> list[dict[str, Any]]:
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM servers WHERE user_id = %s ORDER BY created_at, id",
+                        (user_id,))
+            rows = cur.fetchall()
+    return [_server_row_to_dict(r) for r in rows]
+
+
+def get_server(server_id: str, user_id: Optional[int] = None) -> Optional[dict[str, Any]]:
+    """按 id 取服务器；给 user_id 时校验归属（非本人返回 None）。"""
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            if user_id is None:
+                cur.execute("SELECT * FROM servers WHERE id = %s", (server_id,))
+            else:
+                cur.execute("SELECT * FROM servers WHERE id = %s AND user_id = %s",
+                            (server_id, user_id))
+            row = cur.fetchone()
+    return _server_row_to_dict(row) if row else None
+
+
+def create_server(user_id: int, data: dict[str, Any]) -> dict[str, Any]:
+    """插入服务器记录。id 已存在会抛 UniqueViolation（调用方先 delete 保证幂等）。"""
+    init_db()
+    d = dict(data)
+    sid = str(d.pop("id") or uuid.uuid4().hex[:12])
+    cols: dict[str, Any] = {"id": sid}
+    for k in _SERVER_COLS:
+        v = d.pop(k, None)
+        if k == "port":
+            try:
+                v = int(v or 22)
+            except (TypeError, ValueError):
+                v = 22
+        cols[k] = v
+    extra = d or None  # 剩余未知字段存 extra
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO servers
+                   (id, user_id, name, host, port, username, auth_type,
+                    password, passphrase, key_path, key_content, os, extra,
+                    created_at, updated_at)
+                   VALUES (%(id)s,%(user_id)s,%(name)s,%(host)s,%(port)s,%(username)s,
+                           %(auth_type)s,%(password)s,%(passphrase)s,%(key_path)s,
+                           %(key_content)s,%(os)s,%(extra)s,%(ts)s,%(ts)s)""",
+                {"user_id": int(user_id), "extra": json.dumps(extra, ensure_ascii=False) if extra else None,
+                 "ts": time.time(), **cols},
+            )
+    return get_server(sid)
+
+
+def update_server(user_id: int, server_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """更新本人服务器（归属不符返回 None）。updates 与现有记录合并后整行重写。"""
+    current = get_server(server_id, user_id)
+    if not current:
+        return None
+    merged = dict(current)
+    merged.pop("id", None)
+    merged.update(dict(updates))
+    merged.pop("id", None)
+    d = dict(merged)
+    cols: dict[str, Any] = {}
+    for k in _SERVER_COLS:
+        v = d.pop(k, None)
+        if k == "port":
+            try:
+                v = int(v or 22)
+            except (TypeError, ValueError):
+                v = 22
+        cols[k] = v
+    extra = d or None
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE servers SET name=%(name)s, host=%(host)s, port=%(port)s,
+                       username=%(username)s, auth_type=%(auth_type)s, password=%(password)s,
+                       passphrase=%(passphrase)s, key_path=%(key_path)s,
+                       key_content=%(key_content)s, os=%(os)s, extra=%(extra)s,
+                       updated_at=%(ts)s
+                   WHERE id=%(id)s AND user_id=%(user_id)s""",
+                {"id": server_id, "user_id": int(user_id),
+                 "extra": json.dumps(extra, ensure_ascii=False) if extra else None,
+                 "ts": time.time(), **cols},
+            )
+    return get_server(server_id, user_id)
+
+
+def delete_server(server_id: str, user_id: int) -> bool:
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM servers WHERE id = %s AND user_id = %s",
+                        (server_id, user_id))
+            return cur.rowcount > 0
+
+
+# ---------- 用户 LLM 配置（按用户隔离）----------
+
+_LLM_FIELDS = ("base_url", "api_key", "model", "models", "timeout", "history_budget_chars")
+
+
+def get_user_llm(user_id: int) -> Optional[dict[str, Any]]:
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM user_llm WHERE user_id = %s", (user_id,))
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "base_url": row["base_url"] or "",
+        "api_key": row["api_key"] or "",
+        "model": row["model"] or "",
+        "models": list(row.get("models") or []),
+        "timeout": row["timeout"] or 120,
+        "history_budget_chars": row["history_budget_chars"] or 0,
+    }
+
+
+def upsert_user_llm(user_id: int, cfg: dict[str, Any]) -> None:
+    init_db()
+    vals = {
+        "user_id": int(user_id),
+        "base_url": str(cfg.get("base_url") or ""),
+        "api_key": str(cfg.get("api_key") or ""),
+        "model": str(cfg.get("model") or ""),
+        "models": json.dumps([str(m) for m in (cfg.get("models") or [])], ensure_ascii=False),
+        "timeout": cfg.get("timeout") or 120,
+        "history_budget_chars": cfg.get("history_budget_chars") or 0,
+        "ts": time.time(),
+    }
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO user_llm
+                   (user_id, base_url, api_key, model, models, timeout, history_budget_chars, updated_at)
+                   VALUES (%(user_id)s,%(base_url)s,%(api_key)s,%(model)s,%(models)s,
+                           %(timeout)s,%(history_budget_chars)s,%(ts)s)
+                   ON CONFLICT (user_id) DO UPDATE SET
+                       base_url=%(base_url)s, api_key=%(api_key)s, model=%(model)s,
+                       models=%(models)s, timeout=%(timeout)s,
+                       history_budget_chars=%(history_budget_chars)s, updated_at=%(ts)s""",
+                vals,
+            )
+
+
+def backfill_sessions_owner(admin_user_id: int) -> int:
+    """旧库升级：把没有归属的历史会话划给管理员，返回补写的行数。"""
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE sessions SET user_id = %s WHERE user_id IS NULL",
+                        (int(admin_user_id),))
+            return cur.rowcount
+
+
 # ---------- 会话 ----------
 
-def create_session(title: str = "新会话", server_id: Optional[str] = None) -> dict[str, Any]:
+def create_session(user_id: int, title: str = "新会话",
+                   server_id: Optional[str] = None) -> dict[str, Any]:
     init_db()
     session = {
         "id": uuid.uuid4().hex[:16],
@@ -150,18 +371,23 @@ def create_session(title: str = "新会话", server_id: Optional[str] = None) ->
     with _connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO sessions (id, title, server_id, created_at, updated_at) VALUES (%s,%s,%s,%s,%s)",
-                (session["id"], session["title"], session["server_id"],
+                "INSERT INTO sessions (id, user_id, title, server_id, created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s)",
+                (session["id"], int(user_id), session["title"], session["server_id"],
                  session["created_at"], session["updated_at"]),
             )
     return session
 
 
-def get_session(session_id: str) -> Optional[dict[str, Any]]:
+def get_session(session_id: str, user_id: Optional[int] = None) -> Optional[dict[str, Any]]:
+    """取会话（含消息）；给 user_id 时校验归属（非本人返回 None）。"""
     init_db()
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM sessions WHERE id = %s", (session_id,))
+            if user_id is None:
+                cur.execute("SELECT * FROM sessions WHERE id = %s", (session_id,))
+            else:
+                cur.execute("SELECT * FROM sessions WHERE id = %s AND user_id = %s",
+                            (session_id, user_id))
             s = cur.fetchone()
             if not s:
                 return None
@@ -193,7 +419,8 @@ def get_session(session_id: str) -> Optional[dict[str, Any]]:
         # assistant 的 tool_calls 原样存于 extra
         messages.append(m)
     return {
-        "id": s["id"], "title": s["title"], "server_id": s["server_id"],
+        "id": s["id"], "user_id": s.get("user_id"),
+        "title": s["title"], "server_id": s["server_id"],
         "created_at": s["created_at"], "updated_at": s["updated_at"],
         "messages": messages,
     }
@@ -264,7 +491,7 @@ def append_message(session_id: str, message: dict[str, Any]) -> Optional[dict[st
     return get_session(session_id)
 
 
-def list_sessions() -> list[dict[str, Any]]:
+def list_sessions(user_id: int) -> list[dict[str, Any]]:
     init_db()
     with _connect() as conn:
         with conn.cursor() as cur:
@@ -272,9 +499,10 @@ def list_sessions() -> list[dict[str, Any]]:
                 SELECT s.id, s.title, s.server_id, s.created_at, s.updated_at,
                        COUNT(m.id) AS message_count
                 FROM sessions s LEFT JOIN messages m ON m.session_id = s.id
+                WHERE s.user_id = %s
                 GROUP BY s.id
                 ORDER BY s.updated_at DESC
-            """)
+            """, (user_id,))
             rows = cur.fetchall()
     return [
         {
@@ -286,9 +514,14 @@ def list_sessions() -> list[dict[str, Any]]:
     ]
 
 
-def delete_session(session_id: str) -> bool:
+def delete_session(session_id: str, user_id: Optional[int] = None) -> bool:
+    """删除会话；给 user_id 时只能删本人的。"""
     init_db()
     with _connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+            if user_id is None:
+                cur.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
+            else:
+                cur.execute("DELETE FROM sessions WHERE id = %s AND user_id = %s",
+                            (session_id, user_id))
             return cur.rowcount > 0

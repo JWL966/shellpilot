@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable, Optional
 from config import get_llm_config_raw, list_servers
 from llm_client import LLMError, llm_client
 from safety import RiskLevel, classify_command
-from session import append_message, get_session
+from session import append_message, get_server, get_session
 from ssh_manager import SSHError, ssh_manager
 
 # 事件回调：async def emit(event: dict) -> None
@@ -266,19 +266,20 @@ def _shell_quote(s: str) -> str:
 
 
 class AgentSession:
-    """一个会话的 Agent 循环执行器。"""
+    """一个会话的 Agent 循环执行器（绑定一个用户：LLM 配置与服务器均按用户隔离）。"""
     def __init__(self, session_id: str, emit: EmitFn, default_server_id: Optional[str] = None,
-                 model: Optional[str] = None):
+                 model: Optional[str] = None, user_id: Optional[int] = None):
         self.session_id = session_id
         self.emit = emit
         self.default_server_id = default_server_id
         self.model = model
+        self.user_id = user_id
         self.history: list[dict] = []
         self._pending_confirms: dict[str, asyncio.Future] = {}
         self._cancelled = False
 
     def load_history(self):
-        session = get_session(self.session_id)
+        session = get_session(self.session_id, self.user_id)
         if session:
             self.history = _sanitize_history(session.get("messages", []))
             if not self.default_server_id:
@@ -384,6 +385,10 @@ class AgentSession:
         if not server_id:
             return {"error": "未指定服务器，且会话没有默认服务器。请在下拉框中选择目标服务器。"}
 
+        # 服务器归属校验：只能操作当前用户自己的服务器（多用户隔离）
+        if self.user_id is None or not get_server(str(server_id), self.user_id):
+            return {"error": "服务器不存在或无权访问（服务器按用户隔离）"}
+
         if name == "run_command":
             cmd = args.get("cmd", "")
             if not isinstance(cmd, str) or not cmd.strip():
@@ -456,7 +461,7 @@ class AgentSession:
                 return
 
             # 每轮重建消息列表（system + 历史）；预算为 0 时全量发送
-            budget = int(get_llm_config_raw().get("history_budget_chars") or 0)
+            budget = int(get_llm_config_raw(self.user_id).get("history_budget_chars") or 0)
             trimmed, omitted = _trim_history(self.history, budget)
             messages = [{"role": "system", "content": self._build_system()}]
             if omitted:
@@ -470,7 +475,7 @@ class AgentSession:
             assistant_text_parts: list[str] = []
             tool_calls: list[dict] = []
 
-            async for event in llm_client.chat_stream(messages, tools=AGENT_TOOLS, model=self.model):
+            async for event in llm_client.chat_stream(self.user_id, messages, tools=AGENT_TOOLS, model=self.model):
                 if self._cancelled:
                     await self.emit({"type": "error", "message": "用户已取消"})
                     return
@@ -542,7 +547,7 @@ class AgentSession:
         await self.emit({"type": "error", "message": f"已达最大迭代次数（{max_iter}），强制收敛"})
 
     def _build_system(self) -> str:
-        servers = list_servers()
+        servers = list_servers(self.user_id)
         server_lines = "\n".join(
             f"- id={s['id']} name={s.get('name') or s['host']} host={s['host']} ({s.get('os', 'linux')})"
             for s in servers
@@ -555,8 +560,9 @@ class AgentSession:
 
 async def run_agent_turn(session_id: str, user_message: str, emit: EmitFn,
                          default_server_id: Optional[str] = None,
-                         model: Optional[str] = None) -> AgentSession:
-    agent = AgentSession(session_id, emit, default_server_id, model=model)
+                         model: Optional[str] = None,
+                         user_id: Optional[int] = None) -> AgentSession:
+    agent = AgentSession(session_id, emit, default_server_id, model=model, user_id=user_id)
     agent.load_history()
     await agent.run(user_message, default_server_id)
     return agent

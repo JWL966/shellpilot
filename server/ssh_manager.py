@@ -7,7 +7,7 @@ from typing import Any, Optional
 import paramiko
 
 import config
-from config import get_server_raw
+from session import get_server as get_server_raw  # 按 id 取凭据（server_id 全局唯一；归属校验在路由/Agent 层做）
 
 class SSHError(Exception):
     pass
