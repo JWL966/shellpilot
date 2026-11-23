@@ -5,6 +5,8 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+**中文** | [English](README.en.md)
+
 基于 Web 的对话式 AI 远程运维工具：用自然语言描述服务器问题，AI 通过 SSH 自主执行排查命令，给出诊断结论，并在你确认后动手修复。
 
 ```
@@ -89,6 +91,7 @@ shellpilot/
 | `llm.model` | 兜底/默认模型名，如 `deepseek-chat` | `deepseek-chat` |
 | `llm.models` | 可选模型列表；对话页下拉框据此切换 | `[]` |
 | `llm.timeout` | 请求超时秒 | `120` |
+| `llm.history_budget_chars` | 回灌模型的历史字符上限，`0` = 全量发送 | `0` |
 
 > 温度、max_tokens、迭代轮次等 Agent 内部参数已固化为代码常量（`server/agent.py`、`server/llm_client.py`），不作为配置暴露。API Key 留空或 `********` 保存表示不修改原密钥。
 
