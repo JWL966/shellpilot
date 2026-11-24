@@ -19,6 +19,7 @@ const App = {
     Chat.init();
     Servers.init();
     Settings.init();
+    Account.init();
   },
 
   setupLogout() {
@@ -26,6 +27,12 @@ const App = {
       try { await fetch('/api/logout', { method: 'POST' }); } catch (e) { /* 忽略 */ }
       location.href = '/login';
     });
+  },
+
+  /* 退出登录（供账号页等处复用） */
+  async doLogout() {
+    try { await fetch('/api/logout', { method: 'POST' }); } catch (e) { /* 忽略 */ }
+    location.href = '/login';
   },
 
   setupTheme() {
@@ -58,6 +65,7 @@ const App = {
         App.state.view = view;
         if (view === 'servers') Servers.render();
         if (view === 'settings') Settings.load();
+        if (view === 'account') Account.load();
       });
     });
   },

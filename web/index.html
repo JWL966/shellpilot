@@ -16,6 +16,7 @@
     <button class="tab active" data-view="chat">对话</button>
     <button class="tab" data-view="servers">服务器管理</button>
     <button class="tab" data-view="settings">设置</button>
+    <button class="tab" data-view="account">账号</button>
   </nav>
   <div class="topbar-right">
     <button class="icon-btn" id="btn-theme" title="切换明暗主题">☀️</button>
@@ -124,7 +125,42 @@
 
     <div class="panel">
       <div class="panel-head"><h2>账号安全</h2></div>
-      <form id="password-form" class="form">
+      <div class="field-hint">修改密码、查看账号信息已移至顶栏「账号」页。</div>
+      <div class="account-actions">
+        <button class="btn btn-primary" id="btn-goto-account">前往账号页</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 账号视图 -->
+  <section class="view" id="view-account">
+    <div class="panel">
+      <div class="panel-head"><h2>我的账号</h2></div>
+      <div id="account-loading" class="field-hint">加载中…</div>
+      <div id="account-body" class="hidden">
+        <div class="account-grid">
+          <div class="account-item"><div class="account-label">用户名</div><div class="account-value" id="acc-username">—</div></div>
+          <div class="account-item"><div class="account-label">账号 ID</div><div class="account-value" id="acc-id">—</div></div>
+          <div class="account-item"><div class="account-label">注册时间</div><div class="account-value" id="acc-created">—</div></div>
+          <div class="account-item"><div class="account-label">最近登录</div><div class="account-value" id="acc-last-login">—</div></div>
+          <div class="account-item"><div class="account-label">历史会话</div><div class="account-value" id="acc-sessions">—</div></div>
+          <div class="account-item"><div class="account-label">我的服务器</div><div class="account-value" id="acc-servers">—</div></div>
+          <div class="account-item"><div class="account-label">当前登录会话</div><div class="account-value" id="acc-active">—</div></div>
+        </div>
+        <div class="account-note">数据隔离：这里的会话与服务器只统计你自己的；LLM 配置与服务器列表按用户独立存储。</div>
+        <div class="account-actions">
+          <button class="btn" id="btn-goto-password">修改密码</button>
+          <button class="btn btn-danger" id="btn-logout-account">退出登录</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel hidden" id="account-password-panel">
+      <div class="panel-head">
+        <h2>修改密码</h2>
+        <button class="icon-btn" id="btn-close-password">✕</button>
+      </div>
+      <form id="account-password-form" class="form">
         <div class="field">
           <label>当前密码</label>
           <input type="password" name="old_password" autocomplete="current-password">
@@ -139,10 +175,10 @@
             <input type="password" name="new_password2" autocomplete="new-password">
           </div>
         </div>
-        <div class="field-hint">修改成功后，其他已登录的会话会被注销（当前浏览器不受影响）</div>
+        <div class="field-hint">修改成功后会注销全部登录会话（含当前浏览器），并跳转到登录页</div>
         <div class="form-actions">
-          <button type="submit" class="btn btn-primary">修改密码</button>
-          <span id="password-result" class="result-text"></span>
+          <button type="submit" class="btn btn-primary">确认修改</button>
+          <span id="account-password-result" class="result-text"></span>
         </div>
       </form>
     </div>
@@ -221,6 +257,7 @@
 <script src="/js/chat.js"></script>
 <script src="/js/servers.js"></script>
 <script src="/js/settings.js"></script>
+<script src="/js/account.js"></script>
 <script>
   App.init();
 </script>

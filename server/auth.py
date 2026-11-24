@@ -65,6 +65,25 @@ def current_user_id(request) -> Optional[int]:
     return entry[0] if entry else None
 
 
+def get_user(user_id: int) -> Optional[dict]:
+    """取某用户的会话信息（user_id、过期时间）。"""
+    for tok, (uid, exp) in _sessions.items():
+        if uid == int(user_id):
+            return {"token": tok, "user_id": uid, "expiry": exp}
+    return None
+
+
+def session_count_for(user_id: int) -> int:
+    """某用户当前的活跃会话数（账号页展示用）。"""
+    now = time.time()
+    return sum(1 for _, (uid, exp) in _sessions.items() if uid == int(user_id) and exp >= now)
+
+
+def sessions_from_token(token: str) -> Optional[tuple[int, float]]:
+    """按令牌取会话条目 (user_id, expiry)。"""
+    return _sessions.get(token)
+
+
 def session_token_from(request) -> str:
     auth = request.headers.get("Authorization") or ""
     if auth.lower().startswith("bearer "):  # 供脚本/测试用登录后的会话令牌

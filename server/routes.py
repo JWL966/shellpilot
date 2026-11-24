@@ -14,6 +14,7 @@ from auth import (
     current_user_id,
     drop_other_user_sessions,
     drop_session as drop_auth_session,
+    session_count_for,
     session_token_from,
     set_session_cookie,
 )
@@ -85,6 +86,16 @@ async def logout(request: web.Request) -> web.Response:
     return resp
 
 
+async def me(request: web.Request) -> web.Response:
+    """当前账号信息（账号页）。"""
+    user_id = current_user_id(request)
+    profile = session_store.get_user_profile(user_id)
+    if not profile:
+        return web.json_response({"error": "用户不存在"}, status=404)
+    profile["active_sessions"] = session_count_for(user_id)  # 含当前浏览器
+    return web.json_response({"user": profile})
+
+
 async def change_password(request: web.Request) -> web.Response:
     user_id = current_user_id(request)
     if user_id is None:
@@ -98,9 +109,11 @@ async def change_password(request: web.Request) -> web.Response:
             user_id, str(body.get("old_password") or ""), str(body.get("new_password") or ""))
     except ValueError as e:
         return web.json_response({"error": str(e)}, status=400)
-    # 密码已变：注销该用户的其他会话，保留当前会话避免自己被登出
-    drop_other_user_sessions(user_id, session_token_from(request))
-    return web.json_response({"ok": True})
+    # 密码已变：注销该用户的**全部**会话（含当前），前端引导重新登录
+    drop_other_user_sessions(user_id, "")
+    resp = web.json_response({"ok": True, "relogin": True})
+    clear_session_cookie(resp)
+    return resp
 
 
 # 服务器管理（全部按当前用户隔离）
@@ -353,6 +366,7 @@ def setup_routes(app: web.Application):
     app.router.add_post("/api/logout", logout)
     app.router.add_post("/api/auth/password", change_password)
     app.router.add_get("/api/auth/options", auth_options)
+    app.router.add_get("/api/auth/me", me)
 
     app.router.add_get("/api/servers", list_servers)
     app.router.add_post("/api/servers", add_server)

@@ -170,6 +170,33 @@ def touch_last_login(user_id: int) -> None:
                         (time.time(), user_id))
 
 
+def get_user_profile(user_id: int) -> Optional[dict[str, Any]]:
+    """账号页展示的用户信息（不含密码哈希）。"""
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, username, created_at, last_login_at FROM users WHERE id = %s",
+                (user_id,))
+            row = cur.fetchone()
+    if not row:
+        return None
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM sessions WHERE user_id = %s", (user_id,))
+            n_sessions = int(cur.fetchone()["n"])
+            cur.execute("SELECT COUNT(*) AS n FROM servers WHERE user_id = %s", (user_id,))
+            n_servers = int(cur.fetchone()["n"])
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "created_at": row["created_at"],
+        "last_login_at": row["last_login_at"],
+        "session_count": n_sessions,   # 历史会话数
+        "server_count": n_servers,     # 我的服务器数
+    }
+
+
 # ---------- 服务器（按用户隔离）----------
 
 # servers 表的固定列；其余字段收进 extra JSONB

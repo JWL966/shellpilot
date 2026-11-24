@@ -6,9 +6,8 @@ const Settings = {
       this.saveLLM();
     });
     document.getElementById('btn-test-llm').addEventListener('click', () => this.testLLM());
-    document.getElementById('password-form').addEventListener('submit', (e) => {
-      e.preventDefault();
-      this.changePassword();
+    document.getElementById('btn-goto-account').addEventListener('click', () => {
+      document.querySelector('.tab[data-view="account"]').click();
     });
   },
 
@@ -75,40 +74,6 @@ const Settings = {
     } catch (e) {
       resultEl.className = 'result-text err';
       resultEl.textContent = '保存失败: ' + e.message;
-    }
-  },
-
-  async changePassword() {
-    const form = document.getElementById('password-form');
-    const resultEl = document.getElementById('password-result');
-    const oldPw = form.elements.old_password.value;
-    const newPw = form.elements.new_password.value;
-    const newPw2 = form.elements.new_password2.value;
-
-    resultEl.className = 'result-text';
-    if (!oldPw || !newPw) { resultEl.className = 'result-text err'; resultEl.textContent = '请填写当前密码与新密码'; return; }
-    if (newPw.length < 8) { resultEl.className = 'result-text err'; resultEl.textContent = '新密码至少 8 位'; return; }
-    if (newPw !== newPw2) { resultEl.className = 'result-text err'; resultEl.textContent = '两次输入的新密码不一致'; return; }
-
-    try {
-      const resp = await fetch('/api/auth/password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ old_password: oldPw, new_password: newPw }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) {
-        resultEl.className = 'result-text err';
-        resultEl.textContent = data.error || '修改失败';
-        return;
-      }
-      resultEl.className = 'result-text ok';
-      resultEl.textContent = '✓ 密码已修改';
-      form.reset();
-      setTimeout(() => { resultEl.textContent = ''; }, 3000);
-    } catch (e) {
-      resultEl.className = 'result-text err';
-      resultEl.textContent = '修改失败: ' + e.message;
     }
   },
 

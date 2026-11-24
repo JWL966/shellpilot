@@ -1,9 +1,9 @@
 """认证与安全加固测试：自起完整应用（隔离配置 + 测试数据库），验证登录认证各层。
 
 覆盖：登录（错误凭据/正确凭据）、注册（成功自动登录/重名/弱密码/注册开关）、
-多用户会话隔离、会话 Cookie 与 Bearer、退出登录、修改密码、
-Origin 校验（CSWSH / 跨站简单请求 / 登录 CSRF）、Host 校验（DNS rebinding）、
-base_url 入口校验。
+多用户会话隔离、账号信息接口（/api/auth/me）、会话 Cookie 与 Bearer、
+退出登录、修改密码（改后强制重新登录）、Origin 校验（CSWSH / 跨站简单
+请求 / 登录 CSRF）、Host 校验（DNS rebinding）、base_url 入口校验。
 运行：python tests/test_auth.py   （需本机 PostgreSQL 可用）
 """
 import asyncio
@@ -324,6 +324,18 @@ async def main() -> int:
         ok &= check("ensure_admin_user 表非空时 -> exists", status2 == "exists" and pw2 == "",
                     f"{status2} {pw2}")
 
+        # ---- 账号页信息（/api/auth/me）----
+        r = await client.get("/api/auth/me")
+        me = (await r.json()).get("user") or {}
+        ok &= check("me 接口返回用户名与统计",
+                    r.status == 200 and me.get("username") == "alice"
+                    and me.get("server_count") == 1 and me.get("session_count") == 1
+                    and me.get("active_sessions") >= 1,
+                    str(me))
+        ok &= check("me 接口不泄露密码哈希", "password_hash" not in me, str(me.keys()))
+        r = await client.get("/api/auth/me", headers={"Authorization": f"Bearer {bearer}"})
+        ok &= check("me 支持已失效旧令牌之前的 Bearer 会话", r.status in (200, 401), str(r.status))
+
         # ---- 修改密码（admin，alice 会话已验证隔离）----
         r = await login(client, "admin", "admin-new-pw-8888")
         ok &= check("admin 新密码登录 -> 200", r.status == 200, str(r.status))
@@ -342,11 +354,24 @@ async def main() -> int:
         r = await client.get("/api/sessions")
         admin_sids = [s["id"] for s in (await r.json()).get("sessions") or []]
         ok &= check("admin 的会话列表不含 alice 的", alice_sid not in admin_sids, str(admin_sids))
+
+        # 修改密码 -> 注销全部会话（含当前），需重新登录
         r = await client.post("/api/auth/password",
                               json={"old_password": "admin-new-pw-8888", "new_password": "admin-final-9999"})
-        ok &= check("admin 再次修改密码 -> 200", r.status == 200, str(r.status))
+        body = await r.json()
+        set_cookie = r.headers.get("Set-Cookie", "")
+        ok &= check("admin 再次修改密码 -> 200 且要求重新登录",
+                    r.status == 200 and body.get("relogin") is True, f"{r.status} {body}")
+        ok &= check("修改密码响应清除会话 Cookie", "sp_session=" in set_cookie, set_cookie)
+        r = await client.get("/api/servers")
+        ok &= check("改密后当前会话也被注销 -> 401", r.status == 401, str(r.status))
+        cookies = client.session.cookie_jar.filter_cookies(client.make_url("/"))
+        ok &= check("Cookie jar 里旧令牌已失效", "sp_session" not in cookies
+                    or not cookies["sp_session"].value, str(dict(cookies)))
         r = await login(client, "admin", "admin-final-9999")
-        ok &= check("admin 最终密码登录 -> 200", r.status == 200, str(r.status))
+        ok &= check("admin 用新密码重新登录 -> 200", r.status == 200, str(r.status))
+        r = await client.get("/api/servers")
+        ok &= check("重新登录后 API 正常 -> 200", r.status == 200, str(r.status))
 
         print()
         print("ALL AUTH TESTS PASSED" if ok else "SOME TESTS FAILED")
