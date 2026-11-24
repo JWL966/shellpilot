@@ -6,9 +6,6 @@ const Settings = {
       this.saveLLM();
     });
     document.getElementById('btn-test-llm').addEventListener('click', () => this.testLLM());
-    document.getElementById('btn-goto-account').addEventListener('click', () => {
-      document.querySelector('.tab[data-view="account"]').click();
-    });
   },
 
   renderWarnings(warnings) {

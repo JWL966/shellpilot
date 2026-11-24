@@ -182,29 +182,51 @@ LOGIN_PAGE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>登录 · ShellPilot</title>
 <style>
-  body{background:#0d1117;color:#e6edf3;font-family:system-ui,-apple-system,sans-serif;
-       display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
-  .card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:36px;
-        width:360px;box-sizing:border-box}
-  .logo{font-size:26px;color:#58a6ff;text-align:center}
-  h1{font-size:17px;font-weight:600;text-align:center;margin:6px 0 26px;color:#e6edf3}
-  label{display:block;font-size:12.5px;color:#8b949e;margin:14px 0 6px}
-  input{width:100%;box-sizing:border-box;background:#0d1117;color:#e6edf3;
-        border:1px solid #30363d;border-radius:7px;padding:9px 12px;font-size:13.5px;
-        outline:none;transition:border-color .15s}
-  input:focus{border-color:#58a6ff}
-  button{width:100%;margin-top:22px;background:#238636;color:#fff;border:none;
-         border-radius:7px;padding:10px;cursor:pointer;font-size:14px}
-  button:hover{background:#2ea043}
-  button:disabled{opacity:.6;cursor:default}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       background:#070b12;color:#e9eefc;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+       background-image:radial-gradient(1100px 600px at 12% -12%,rgba(76,141,255,.22),transparent 62%),
+                         radial-gradient(900px 520px at 88% 8%,rgba(139,92,246,.18),transparent 62%),
+                         radial-gradient(700px 420px at 50% 118%,rgba(34,211,238,.08),transparent 60%);
+       background-attachment:fixed}
+  .card{position:relative;width:376px;padding:38px 34px 30px;border-radius:18px;
+        background:rgba(17,23,35,.72);border:1px solid rgba(126,166,238,.3);
+        box-shadow:0 24px 70px rgba(0,0,0,.55),0 0 0 1px rgba(76,141,255,.1);
+        backdrop-filter:blur(18px) saturate(140%);-webkit-backdrop-filter:blur(18px) saturate(140%);
+        animation:in .5s cubic-bezier(.2,.9,.3,1) both}
+  .card::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;border-radius:18px 18px 0 0;
+        background:linear-gradient(90deg,#4c8dff,#8b5cf6,#22d3ee);opacity:.85}
+  @keyframes in{from{opacity:0;transform:translateY(14px) scale(.97)}to{opacity:1;transform:none}}
+  .logo{width:52px;height:52px;margin:0 auto 14px;display:grid;place-items:center;border-radius:15px;
+        background:linear-gradient(135deg,#4c8dff,#8b5cf6);color:#fff;font-size:24px;
+        box-shadow:0 10px 30px rgba(76,141,255,.42);animation:pulse 4s ease-in-out infinite}
+  @keyframes pulse{0%,100%{box-shadow:0 8px 24px rgba(76,141,255,.34)}50%{box-shadow:0 10px 38px rgba(139,92,246,.6)}}
+  h1{font-size:17px;font-weight:700;text-align:center;margin:0 0 4px;letter-spacing:.4px;
+     background:linear-gradient(100deg,#eff4ff,#a7c1ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{text-align:center;font-size:12px;color:#7f8ea8;margin:0 0 26px;letter-spacing:.3px}
+  label{display:block;font-size:12.5px;color:#93a3bd;margin:14px 0 7px}
+  input{width:100%;background:rgba(32,41,59,.66);color:#e9eefc;border:1px solid rgba(116,146,199,.24);
+        border-radius:10px;padding:10px 13px;font-size:13.5px;outline:none;
+        transition:border-color .16s,box-shadow .16s}
+  input:focus{border-color:#4c8dff;box-shadow:0 0 0 3px rgba(76,141,255,.18)}
+  button{width:100%;margin-top:24px;background:linear-gradient(135deg,#4c8dff,#8b5cf6);color:#fff;border:none;
+         border-radius:10px;padding:11px;cursor:pointer;font-size:14px;font-weight:600;letter-spacing:1px;
+         box-shadow:0 8px 24px rgba(76,141,255,.32);transition:filter .16s,transform .16s,box-shadow .16s}
+  button:hover{filter:brightness(1.08);transform:translateY(-1px);box-shadow:0 10px 30px rgba(139,92,246,.4)}
+  button:active{transform:none}
+  button:disabled{opacity:.55;cursor:default;transform:none}
   .err{color:#f85149;font-size:12.5px;margin-top:14px;min-height:17px;text-align:center}
-  .hint{color:#8b949e;font-size:12px;margin-top:18px;line-height:1.7;text-align:center}
+  .hint{color:#6d7c95;font-size:11.5px;margin-top:18px;line-height:1.75;text-align:center}
+  .links{text-align:center;margin-top:10px;font-size:12.5px}
+  .links a{color:#7aaeff;text-decoration:none}
+  .links a:hover{text-decoration:underline}
 </style>
 </head>
 <body>
 <div class="card">
   <div class="logo">&#9672;</div>
-  <h1>ShellPilot 登录</h1>
+  <h1>ShellPilot</h1>
+  <p class="sub">远程服务器智能运维助手</p>
   <form id="f">
     <label for="u">用户名</label>
     <input id="u" type="text" autocomplete="username" autofocus>
@@ -213,10 +235,8 @@ LOGIN_PAGE = """<!DOCTYPE html>
     <button type="submit" id="b">登 录</button>
     <div class="err" id="e"></div>
   </form>
-  <div style="text-align:center;margin-top:6px;font-size:12.5px">
-    <a id="reg-link" href="/register" style="color:#58a6ff">注册新账号</a>
-  </div>
-  <div class="hint">首次启动的账号密码在服务启动日志里<br>忘记密码可在服务端执行 python server/app.py --reset-password</div>
+  <div class="links" id="reg-wrap"><a id="reg-link" href="/register">注册新账号</a></div>
+  <div class="hint">首次启动的账号密码见服务启动日志<br>忘记密码：python server/app.py --reset-password</div>
 </div>
 <script>
   // 注册开关关闭时隐藏注册入口
@@ -261,31 +281,51 @@ REGISTER_PAGE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>注册 · ShellPilot</title>
 <style>
-  body{background:#0d1117;color:#e6edf3;font-family:system-ui,-apple-system,sans-serif;
-       display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
-  .card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:36px;
-        width:360px;box-sizing:border-box}
-  .logo{font-size:26px;color:#58a6ff;text-align:center}
-  h1{font-size:17px;font-weight:600;text-align:center;margin:6px 0 26px;color:#e6edf3}
-  label{display:block;font-size:12.5px;color:#8b949e;margin:14px 0 6px}
-  input{width:100%;box-sizing:border-box;background:#0d1117;color:#e6edf3;
-        border:1px solid #30363d;border-radius:7px;padding:9px 12px;font-size:13.5px;
-        outline:none;transition:border-color .15s}
-  input:focus{border-color:#58a6ff}
-  button{width:100%;margin-top:22px;background:#238636;color:#fff;border:none;
-         border-radius:7px;padding:10px;cursor:pointer;font-size:14px}
-  button:hover{background:#2ea043}
-  button:disabled{opacity:.6;cursor:default}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       background:#070b12;color:#e9eefc;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+       background-image:radial-gradient(1100px 600px at 12% -12%,rgba(76,141,255,.22),transparent 62%),
+                         radial-gradient(900px 520px at 88% 8%,rgba(139,92,246,.18),transparent 62%),
+                         radial-gradient(700px 420px at 50% 118%,rgba(34,211,238,.08),transparent 60%);
+       background-attachment:fixed}
+  .card{position:relative;width:376px;padding:38px 34px 28px;border-radius:18px;
+        background:rgba(17,23,35,.72);border:1px solid rgba(126,166,238,.3);
+        box-shadow:0 24px 70px rgba(0,0,0,.55),0 0 0 1px rgba(76,141,255,.1);
+        backdrop-filter:blur(18px) saturate(140%);-webkit-backdrop-filter:blur(18px) saturate(140%);
+        animation:in .5s cubic-bezier(.2,.9,.3,1) both}
+  .card::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;border-radius:18px 18px 0 0;
+        background:linear-gradient(90deg,#4c8dff,#8b5cf6,#22d3ee);opacity:.85}
+  @keyframes in{from{opacity:0;transform:translateY(14px) scale(.97)}to{opacity:1;transform:none}}
+  .logo{width:52px;height:52px;margin:0 auto 14px;display:grid;place-items:center;border-radius:15px;
+        background:linear-gradient(135deg,#4c8dff,#8b5cf6);color:#fff;font-size:24px;
+        box-shadow:0 10px 30px rgba(76,141,255,.42);animation:pulse 4s ease-in-out infinite}
+  @keyframes pulse{0%,100%{box-shadow:0 8px 24px rgba(76,141,255,.34)}50%{box-shadow:0 10px 38px rgba(139,92,246,.6)}}
+  h1{font-size:17px;font-weight:700;text-align:center;margin:0 0 4px;letter-spacing:.4px;
+     background:linear-gradient(100deg,#eff4ff,#a7c1ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{text-align:center;font-size:12px;color:#7f8ea8;margin:0 0 24px;letter-spacing:.3px}
+  label{display:block;font-size:12.5px;color:#93a3bd;margin:13px 0 7px}
+  input{width:100%;background:rgba(32,41,59,.66);color:#e9eefc;border:1px solid rgba(116,146,199,.24);
+        border-radius:10px;padding:10px 13px;font-size:13.5px;outline:none;
+        transition:border-color .16s,box-shadow .16s}
+  input:focus{border-color:#4c8dff;box-shadow:0 0 0 3px rgba(76,141,255,.18)}
+  button{width:100%;margin-top:22px;background:linear-gradient(135deg,#4c8dff,#8b5cf6);color:#fff;border:none;
+         border-radius:10px;padding:11px;cursor:pointer;font-size:14px;font-weight:600;letter-spacing:1px;
+         box-shadow:0 8px 24px rgba(76,141,255,.32);transition:filter .16s,transform .16s,box-shadow .16s}
+  button:hover{filter:brightness(1.08);transform:translateY(-1px);box-shadow:0 10px 30px rgba(139,92,246,.4)}
+  button:active{transform:none}
+  button:disabled{opacity:.55;cursor:default;transform:none}
   .err{color:#f85149;font-size:12.5px;margin-top:14px;min-height:17px;text-align:center}
-  .hint{color:#8b949e;font-size:12px;margin-top:18px;line-height:1.7;text-align:center}
+  .hint{color:#6d7c95;font-size:11.5px;margin-top:16px;line-height:1.75;text-align:center}
   .links{text-align:center;margin-top:8px;font-size:12.5px}
-  .links a{color:#58a6ff}
+  .links a{color:#7aaeff;text-decoration:none}
+  .links a:hover{text-decoration:underline}
 </style>
 </head>
 <body>
 <div class="card">
   <div class="logo">&#9672;</div>
-  <h1>注册 ShellPilot 账号</h1>
+  <h1>创建账号</h1>
+  <p class="sub">注册后即可独立使用自己的模型与服务器</p>
   <form id="f">
     <label for="u">用户名（1~32 字符，不含空格）</label>
     <input id="u" type="text" autocomplete="username" autofocus>
@@ -297,7 +337,7 @@ REGISTER_PAGE = """<!DOCTYPE html>
     <div class="err" id="e"></div>
   </form>
   <div class="links">已有账号？<a href="/login">去登录</a></div>
-  <div class="hint">注册后即可登录使用；密码经 PBKDF2 加密存储</div>
+  <div class="hint">密码经 PBKDF2（20 万次迭代）加密存储</div>
 </div>
 <script>
   fetch('/api/auth/options').then(r => r.json()).then(o => {

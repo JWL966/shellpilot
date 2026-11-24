@@ -1,10 +1,15 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShellPilot · 远程服务器运维助手</title>
-<link rel="stylesheet" href="/css/style.css">
+<script>
+  // 尽早应用主题，避免首屏闪白
+  try { document.documentElement.setAttribute('data-theme',
+    localStorage.getItem('ycai-theme') === 'light' ? 'light' : 'dark'); } catch (e) {}
+</script>
+<link rel="stylesheet" href="/css/style.css?v=2.0.2">
 </head>
 <body>
 <header class="topbar">
@@ -123,21 +128,23 @@
       </form>
     </div>
 
-    <div class="panel">
-      <div class="panel-head"><h2>账号安全</h2></div>
-      <div class="field-hint">修改密码、查看账号信息已移至顶栏「账号」页。</div>
-      <div class="account-actions">
-        <button class="btn btn-primary" id="btn-goto-account">前往账号页</button>
-      </div>
-    </div>
   </section>
 
   <!-- 账号视图 -->
   <section class="view" id="view-account">
     <div class="panel">
       <div class="panel-head"><h2>我的账号</h2></div>
-      <div id="account-loading" class="field-hint">加载中…</div>
+      <div id="account-loading" class="account-loading">
+        <span class="spinner"></span><span class="loading-text">加载中…</span>
+      </div>
       <div id="account-body" class="hidden">
+        <div class="account-hero">
+          <span class="account-avatar" id="acc-avatar">?</span>
+          <div class="account-hero-text">
+            <div class="account-hero-name" id="acc-hero-name">—</div>
+            <div class="account-hero-sub">已通过会话认证 · 数据按用户隔离</div>
+          </div>
+        </div>
         <div class="account-grid">
           <div class="account-item"><div class="account-label">用户名</div><div class="account-value" id="acc-username">—</div></div>
           <div class="account-item"><div class="account-label">账号 ID</div><div class="account-value" id="acc-id">—</div></div>
@@ -253,11 +260,11 @@
   </div>
 </div>
 
-<script src="/js/app.js"></script>
-<script src="/js/chat.js"></script>
-<script src="/js/servers.js"></script>
-<script src="/js/settings.js"></script>
-<script src="/js/account.js"></script>
+<script src="/js/app.js?v=2.0.2"></script>
+<script src="/js/chat.js?v=2.0.2"></script>
+<script src="/js/servers.js?v=2.0.2"></script>
+<script src="/js/settings.js?v=2.0.2"></script>
+<script src="/js/account.js?v=2.0.2"></script>
 <script>
   App.init();
 </script>

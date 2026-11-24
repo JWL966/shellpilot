@@ -13,6 +13,8 @@ const Account = {
       e.preventDefault();
       this.changePassword();
     });
+    // 页面加载即预取账号信息：即使标签切换逻辑异常，点开「账号」也不会卡在“加载中”
+    this.load();
   },
 
   fmt(ts) {
@@ -25,12 +27,22 @@ const Account = {
   async load() {
     const loading = document.getElementById('account-loading');
     const body = document.getElementById('account-body');
+    const setLoadingText = (text, failed) => {
+      loading.classList.toggle('failed', !!failed);
+      const span = loading.querySelector('.loading-text');
+      if (span) span.textContent = text;
+      else loading.textContent = text;
+    };
     try {
       const resp = await fetch('/api/auth/me');
       if (resp.status === 401) { location.href = '/login'; return; }
       const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
       const u = data.user || {};
-      document.getElementById('acc-username').textContent = u.username || '—';
+      const name = u.username || '—';
+      document.getElementById('acc-username').textContent = name;
+      document.getElementById('acc-hero-name').textContent = name;
+      document.getElementById('acc-avatar').textContent = String(name).slice(0, 1) || '?';
       document.getElementById('acc-id').textContent = u.id ?? '—';
       document.getElementById('acc-created').textContent = this.fmt(u.created_at);
       document.getElementById('acc-last-login').textContent = this.fmt(u.last_login_at);
@@ -40,7 +52,7 @@ const Account = {
       loading.classList.add('hidden');
       body.classList.remove('hidden');
     } catch (e) {
-      loading.textContent = '加载失败: ' + e.message;
+      setLoadingText('加载失败: ' + e.message + '（可刷新页面重试）', true);
     }
   },
 

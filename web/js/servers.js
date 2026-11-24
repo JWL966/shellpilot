@@ -25,7 +25,7 @@ const Servers = {
     const grid = document.getElementById('server-list');
     grid.innerHTML = '';
     if (!servers.length) {
-      grid.innerHTML = `<div style="color:#667085;font-size:13px">还没有服务器，点击右上角"添加服务器"开始。</div>`;
+      grid.innerHTML = `<div class="server-empty">还没有服务器，点击右上角“添加服务器”开始。</div>`;
       return;
     }
     servers.forEach(s => {
@@ -42,7 +42,7 @@ const Servers = {
           <button class="btn btn-sm" data-act="test">测试连接</button>
           <button class="btn btn-sm" data-act="edit">编辑</button>
           <button class="btn btn-sm btn-ghost" data-act="hostkey" title="服务器重装系统后，删除旧的 SSH 主机指纹以便重新记录">重置指纹</button>
-          <button class="btn btn-sm btn-ghost" data-act="del" style="color:#f85149">删除</button>
+          <button class="btn btn-sm btn-ghost s-danger" data-act="del">删除</button>
         </div>
       `;
       card.querySelector('.s-name').textContent = s.name || s.host;

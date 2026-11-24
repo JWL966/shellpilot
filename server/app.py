@@ -21,7 +21,10 @@ async def index(request: web.Request) -> web.StreamResponse:
     # 未登录 → 跳转登录页；已登录 → 主界面
     if not auth_gate.session_ok(request):
         raise web.HTTPFound("/login")
-    return web.FileResponse(os.path.join(WEB_DIR, "index.html"))
+    resp = web.FileResponse(os.path.join(WEB_DIR, "index.html"))
+    # 主界面必须每次回源校验：否则浏览器缓存旧 HTML，脚本版本号就失效了
+    resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return resp
 
 
 async def login_page(request: web.Request) -> web.Response:
@@ -29,14 +32,16 @@ async def login_page(request: web.Request) -> web.Response:
     if auth_gate.session_ok(request):
         raise web.HTTPFound("/")
     return web.Response(text=auth_gate.LOGIN_PAGE,
-                        content_type="text/html", charset="utf-8")
+                        content_type="text/html", charset="utf-8",
+                        headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 async def register_page(request: web.Request) -> web.Response:
     if auth_gate.session_ok(request):
         raise web.HTTPFound("/")
     return web.Response(text=auth_gate.REGISTER_PAGE,
-                        content_type="text/html", charset="utf-8")
+                        content_type="text/html", charset="utf-8",
+                        headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 async def on_cleanup(app: web.Application):

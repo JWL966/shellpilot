@@ -119,7 +119,8 @@ async def main() -> int:
                     f"{r.status} {r.headers.get('Location')}")
         r = await client.get("/login")
         body = await r.text()
-        ok &= check("登录页公开可访问", r.status == 200 and "ShellPilot 登录" in body, str(r.status))
+        ok &= check("登录页公开可访问", r.status == 200 and "ShellPilot" in body and 'id="f"' in body,
+                    str(r.status))
 
         # ---- 登录 ----
         r = await login(client, "admin", "wrong-password")
@@ -211,7 +212,8 @@ async def main() -> int:
         # ---- 注册 ----
         r = await client.get("/register")
         body = await r.text()
-        ok &= check("注册页公开可访问", r.status == 200 and "注册 ShellPilot 账号" in body, str(r.status))
+        ok &= check("注册页公开可访问", r.status == 200 and "ShellPilot" in body and 'id="f"' in body,
+                    str(r.status))
         r = await client.get("/api/auth/options")
         data = await r.json()
         ok &= check("options 接口返回注册开关",
