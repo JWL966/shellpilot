@@ -13,6 +13,18 @@ class SSHError(Exception):
     pass
 
 
+def _smart_decode(data: bytes) -> str:
+    """智能解码：UTF-8 优先，失败依次尝试 GBK / Big5（Windows 中文控制台默认 GBK）。"""
+    if not data:
+        return ""
+    for enc in ("utf-8", "gbk", "cp950"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 # TOFU 指纹库路径：环境变量 SHELLPILOT_KNOWN_HOSTS 可覆盖，默认 ~/.shellpilot/known_hosts
 KNOWN_HOSTS_PATH = os.environ.get(
     "SHELLPILOT_KNOWN_HOSTS",
@@ -137,14 +149,19 @@ class SSHManager:
 
     def exec_command(self, server_id: str, cmd: str, timeout: int = 30) -> dict[str, Any]:
         """执行命令，返回 {exit_code, stdout, stderr, duration_ms}。失败自动重连一次。"""
+        # 本机模式：不经过 SSH，直接在本机用子进程执行
+        server = get_server_raw(server_id)
+        if server and server.get("conn_type") == "local":
+            return self._exec_local(server, cmd, timeout)
+
         last_err: Optional[Exception] = None
         for attempt in (1, 2):
             try:
                 client = self._get_client(server_id)
                 start = time.time()
                 stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
-                out = stdout.read().decode("utf-8", errors="replace")
-                err = stderr.read().decode("utf-8", errors="replace")
+                out = _smart_decode(stdout.read())
+                err = _smart_decode(stderr.read())
                 code = stdout.channel.recv_exit_status()
                 duration = int((time.time() - start) * 1000)
                 return {
@@ -161,10 +178,78 @@ class SSHManager:
                     break
         raise SSHError(f"命令执行失败: {last_err}")
 
-    def test_connection(self, server_id: str) -> dict[str, Any]:
+    def _exec_local(self, server: dict[str, Any], cmd: str, timeout: int) -> dict[str, Any]:
+        """本机模式执行：Windows 经 PowerShell，Linux 经 bash/sh。安全分级照常生效。"""
+        import shutil
+        import subprocess
+
+        is_win = (str(server.get("os") or "").lower() == "windows")
+        if is_win:
+            pw = shutil.which("powershell") or shutil.which("pwsh")
+            if pw:
+                argv = [pw, "-NoProfile", "-NonInteractive",
+                        "-ExecutionPolicy", "Bypass", "-Command", cmd]
+            elif os.name == "nt":
+                argv = ["cmd.exe", "/d", "/s", "/c", cmd]
+            else:
+                raise SSHError("本机未找到 PowerShell，无法以 Windows 模式执行本机命令")
+        else:
+            argv = ["/bin/bash", "-lc", cmd] if os.path.exists("/bin/bash") else ["/bin/sh", "-c", cmd]
+
+        start = time.time()
         try:
-            result = self.exec_command(server_id, "echo ok && hostname && uname -a", timeout=10)
-            return {"success": True, "output": result["stdout"]}
+            proc = subprocess.run(argv, capture_output=True, timeout=max(1, int(timeout)))
+            out = _smart_decode(proc.stdout)
+            err = _smart_decode(proc.stderr)
+            code = proc.returncode
+            if code != 0 and not err.strip() and not out.strip():
+                err = f"命令退出码 {code}"
+        except subprocess.TimeoutExpired as e:
+            out = _smart_decode(e.stdout or b"")
+            err = _smart_decode(e.stderr or b"")
+            if not err.strip():
+                err = f"命令超时（{timeout}s），已终止"
+            code = 124
+        except Exception as e:
+            raise SSHError(f"本机命令执行失败: {e}") from e
+        return {
+            "exit_code": code,
+            "stdout": out,
+            "stderr": err,
+            "duration_ms": int((time.time() - start) * 1000),
+        }
+
+    def test_connection(self, server_id: str) -> dict[str, Any]:
+        """测试连接；SSH 目标若未标注系统类型，同时探测并返回识别到的 os。"""
+        try:
+            server = get_server_raw(server_id) or {}
+            conn_local = server.get("conn_type") == "local"
+            os_name = str(server.get("os") or "").strip().lower()
+            if conn_local:
+                # 本机模式：系统类型在保存时已按宿主机写死，直接用对应 shell 探活
+                if os_name == "windows":
+                    probe = "Write-Output ok; Write-Output $env:COMPUTERNAME"
+                else:
+                    probe = "echo ok && hostname && uname -a"
+            elif os_name == "windows":
+                probe = ('powershell -NoProfile -Command '
+                         '"Write-Output ok; Write-Output $env:COMPUTERNAME"')
+            elif os_name == "linux":
+                probe = "echo ok && hostname && uname -a"
+            else:
+                # 未标注系统：Linux 会打印 Linux；Windows(cmd) 里 uname 不存在转而执行 ver
+                probe = "uname -s || ver"
+
+            result = self.exec_command(server_id, probe, timeout=15)
+            out = result["stdout"]
+            detected = None
+            if not conn_local and not os_name:
+                low = out.lower()
+                if "microsoft windows" in low or "windows po" in low:
+                    detected = "windows"
+                elif "linux" in low or "darwin" in low:
+                    detected = "linux"
+            return {"success": True, "output": out, "os": os_name or detected}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

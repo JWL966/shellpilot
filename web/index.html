@@ -9,7 +9,7 @@
   try { document.documentElement.setAttribute('data-theme',
     localStorage.getItem('ycai-theme') === 'light' ? 'light' : 'dark'); } catch (e) {}
 </script>
-<link rel="stylesheet" href="/css/style.css?v=2.0.2">
+<link rel="stylesheet" href="/css/style.css?v=2.1.1">
 </head>
 <body>
 <header class="topbar">
@@ -46,10 +46,11 @@
         <h1>ShellPilot</h1>
         <p>用自然语言描述服务器问题，我会连接服务器自主排查、按需操作。</p>
         <div class="examples">
-          <div class="example-card" data-text="帮我检查一下 nginx 服务为什么启动不了">帮我检查一下 nginx 服务为什么启动不了</div>
-          <div class="example-card" data-text="服务器磁盘快满了，帮我看看哪些目录占用最大">服务器磁盘快满了，帮我看看哪些目录占用最大</div>
-          <div class="example-card" data-text="检查 8080 端口被哪个进程占用了">检查 8080 端口被哪个进程占用了</div>
-          <div class="example-card" data-text="最近系统负载很高，帮我排查一下原因">最近系统负载很高，帮我排查一下原因</div>
+          <div class="example-card" data-text="帮我检查一下 nginx 服务为什么启动不了"><span class="ex-cmd">$</span>帮我检查一下 nginx 服务为什么启动不了</div>
+          <div class="example-card" data-text="服务器磁盘快满了，帮我看看哪些目录占用最大"><span class="ex-cmd">$</span>服务器磁盘快满了，帮我看看哪些目录占用最大</div>
+          <div class="example-card" data-text="检查 8080 端口被哪个进程占用了"><span class="ex-cmd">$</span>检查 8080 端口被哪个进程占用了</div>
+          <div class="example-card" data-text="最近系统负载很高，帮我排查一下原因"><span class="ex-cmd">$</span>最近系统负载很高，帮我排查一下原因</div>
+          <div class="example-card" data-text="看看这台 Windows 本机的服务和资源占用情况"><span class="ex-cmd">PS&gt;</span>看看这台 Windows 本机的服务和资源占用情况</div>
         </div>
       </div>
       <div class="messages" id="messages"></div>
@@ -207,45 +208,67 @@
       </div>
       <div class="field-row">
         <div class="field">
-          <label>主机 IP / 域名</label>
-          <input type="text" name="host" required placeholder="192.168.1.10">
+          <label>连接方式</label>
+          <select name="conn_type" id="conn-type">
+            <option value="ssh">SSH 远程</option>
+            <option value="local">本机（免 SSH）</option>
+          </select>
         </div>
-        <div class="field small">
-          <label>SSH 端口</label>
-          <input type="number" name="port" value="22" min="1" max="65535">
-        </div>
-      </div>
-      <div class="field">
-        <label>用户名</label>
-        <input type="text" name="username" required placeholder="root">
-      </div>
-      <div class="field-row">
         <div class="field">
-          <label>认证方式</label>
-          <select name="auth_type" id="auth-type">
-            <option value="password">密码</option>
-            <option value="key">私钥</option>
+          <label>系统类型</label>
+          <select name="os" id="server-os">
+            <option value="linux">Linux</option>
+            <option value="windows">Windows</option>
           </select>
         </div>
       </div>
-      <div class="field" id="field-password">
-        <label>密码</label>
-        <input type="password" name="password" placeholder="留空或 ******** 表示不修改">
+      <div id="ssh-fields">
+        <div class="field-row">
+          <div class="field">
+            <label>主机 IP / 域名</label>
+            <input type="text" name="host" required placeholder="192.168.1.10">
+          </div>
+          <div class="field small">
+            <label>SSH 端口</label>
+            <input type="number" name="port" value="22" min="1" max="65535">
+          </div>
+        </div>
+        <div class="field">
+          <label>用户名</label>
+          <input type="text" name="username" required placeholder="root">
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>认证方式</label>
+            <select name="auth_type" id="auth-type">
+              <option value="password">密码</option>
+              <option value="key">私钥</option>
+            </select>
+          </div>
+        </div>
+        <div class="field" id="field-password">
+          <label>密码</label>
+          <input type="password" name="password" placeholder="留空或 ******** 表示不修改">
+        </div>
+        <div class="hidden" id="field-key">
+          <div class="field">
+            <label>私钥内容</label>
+            <textarea name="key_content" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..."></textarea>
+            <div class="field-hint">粘贴私钥内容，或填写下方路径（二选一）</div>
+          </div>
+          <div class="field">
+            <label>私钥路径（服务端本机路径）</label>
+            <input type="text" name="key_path" placeholder="C:\Users\you\.ssh\id_rsa">
+          </div>
+          <div class="field">
+            <label>私钥口令（可选）</label>
+            <input type="password" name="passphrase" placeholder="留空或 ******** 表示不修改">
+          </div>
+        </div>
       </div>
-      <div class="hidden" id="field-key">
-        <div class="field">
-          <label>私钥内容</label>
-          <textarea name="key_content" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..."></textarea>
-          <div class="field-hint">粘贴私钥内容，或填写下方路径（二选一）</div>
-        </div>
-        <div class="field">
-          <label>私钥路径（服务端本机路径）</label>
-          <input type="text" name="key_path" placeholder="C:\Users\you\.ssh\id_rsa">
-        </div>
-        <div class="field">
-          <label>私钥口令（可选）</label>
-          <input type="password" name="passphrase" placeholder="留空或 ******** 表示不修改">
-        </div>
+      <div class="field-hint local-hint hidden" id="local-hint">
+        本机模式：命令直接在运行 ShellPilot 的这台电脑上执行（Windows 经 PowerShell），无需地址与凭据；
+        系统类型自动识别。安全分级照常生效：只读命令自动执行，危险操作仍需确认。
       </div>
       <div class="field">
         <label>备注（可选）</label>
@@ -260,11 +283,11 @@
   </div>
 </div>
 
-<script src="/js/app.js?v=2.0.2"></script>
-<script src="/js/chat.js?v=2.0.2"></script>
-<script src="/js/servers.js?v=2.0.2"></script>
-<script src="/js/settings.js?v=2.0.2"></script>
-<script src="/js/account.js?v=2.0.2"></script>
+<script src="/js/app.js?v=2.1.0"></script>
+<script src="/js/chat.js?v=2.1.0"></script>
+<script src="/js/servers.js?v=2.1.0"></script>
+<script src="/js/settings.js?v=2.1.0"></script>
+<script src="/js/account.js?v=2.1.0"></script>
 <script>
   App.init();
 </script>

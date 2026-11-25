@@ -7,6 +7,7 @@ const Servers = {
       if (e.target.id === 'server-modal') this.closeModal();
     });
     document.getElementById('auth-type').addEventListener('change', () => this.toggleAuth());
+    document.getElementById('conn-type').addEventListener('change', () => this.toggleConn());
     document.getElementById('server-form').addEventListener('submit', (e) => {
       e.preventDefault();
       this.save();
@@ -18,6 +19,16 @@ const Servers = {
     const type = document.getElementById('auth-type').value;
     document.getElementById('field-password').classList.toggle('hidden', type !== 'password');
     document.getElementById('field-key').classList.toggle('hidden', type !== 'key');
+  },
+
+  toggleConn() {
+    // 本机模式：隐藏 SSH 地址/凭据字段并禁用（disabled 字段不参与校验与提交）
+    const local = document.getElementById('conn-type').value === 'local';
+    document.getElementById('ssh-fields').classList.toggle('hidden', local);
+    document.getElementById('local-hint').classList.toggle('hidden', !local);
+    document.getElementById('server-os').disabled = local; // 本机模式系统类型由服务端自动识别
+    document.querySelectorAll('#ssh-fields input, #ssh-fields select, #ssh-fields textarea')
+      .forEach(el => { el.disabled = local; });
   },
 
   async render() {
@@ -34,7 +45,8 @@ const Servers = {
       card.innerHTML = `
         <div class="server-card-head">
           <span class="s-name"></span>
-          <span class="s-badge"></span>
+          <span class="s-badge os-badge"></span>
+          <span class="s-badge auth-badge"></span>
         </div>
         <div class="s-host"></div>
         <div class="s-note"></div>
@@ -45,9 +57,18 @@ const Servers = {
           <button class="btn btn-sm btn-ghost s-danger" data-act="del">删除</button>
         </div>
       `;
+      const isLocal = s.conn_type === 'local';
+      const osLabel = s.os === 'windows' ? 'Windows' : 'Linux';
+      const osBadge = card.querySelector('.os-badge');
+      osBadge.textContent = isLocal ? '本机' : osLabel;
+      osBadge.classList.add(isLocal ? 'os-local' : (s.os === 'windows' ? 'os-windows' : 'os-linux'));
+      const authBadge = card.querySelector('.auth-badge');
+      authBadge.textContent = s.auth_type === 'key' || s.has_key ? '密钥' : '密码';
+      authBadge.classList.toggle('hidden', isLocal);
       card.querySelector('.s-name').textContent = s.name || s.host;
-      card.querySelector('.s-badge').textContent = s.auth_type === 'key' || s.has_key ? '密钥' : '密码';
-      card.querySelector('.s-host').textContent = `${s.username}@${s.host}:${s.port || 22}`;
+      card.querySelector('.s-host').textContent = isLocal
+        ? `本机 · ${osLabel} · ${s.os === 'windows' ? 'PowerShell' : 'bash'}`
+        : `${s.username}@${s.host}:${s.port || 22}`;
       card.querySelector('.s-note').textContent = s.note || '';
 
       card.querySelector('[data-act="test"]').addEventListener('click', (e) => this.test(s.id, e.target));
@@ -69,7 +90,9 @@ const Servers = {
     if (server) {
       form.elements.id.value = server.id;
       form.elements.name.value = server.name || '';
-      form.elements.host.value = server.host || '';
+      form.elements.conn_type.value = server.conn_type === 'local' ? 'local' : 'ssh';
+      form.elements.os.value = server.os === 'windows' ? 'windows' : 'linux';
+      form.elements.host.value = server.conn_type === 'local' ? 'local' : (server.host || '');
       form.elements.port.value = server.port || 22;
       form.elements.username.value = server.username || '';
       const authType = server.auth_type || (server.has_key ? 'key' : 'password');
@@ -83,6 +106,7 @@ const Servers = {
       form.elements.auth_type.value = 'password';
     }
     this.toggleAuth();
+    this.toggleConn();
     modal.classList.remove('hidden');
     form.elements.name.focus();
   },
@@ -93,14 +117,23 @@ const Servers = {
 
   collectForm() {
     const form = document.getElementById('server-form');
+    const isLocal = form.elements.conn_type.value === 'local';
     const data = {
       name: form.elements.name.value.trim(),
+      conn_type: form.elements.conn_type.value,
+      os: form.elements.os.value,
       host: form.elements.host.value.trim(),
       port: parseInt(form.elements.port.value) || 22,
       username: form.elements.username.value.trim(),
       auth_type: form.elements.auth_type.value,
       note: form.elements.note.value.trim(),
     };
+    if (isLocal) {
+      // 本机模式：地址/端口/凭据由服务端自动补全
+      data.host = 'local';
+      data.port = 0;
+      data.username = '';
+    }
     const pwd = form.elements.password.value;
     if (pwd && pwd !== '********') data.password = pwd;
 
@@ -118,9 +151,10 @@ const Servers = {
   async save() {
     const data = this.collectForm();
     const resultEl = document.getElementById('server-form-result');
-    if (!data.name || !data.host || !data.username) {
+    const isLocal = data.conn_type === 'local';
+    if (!data.name || (!isLocal && (!data.host || !data.username))) {
       resultEl.className = 'result-text err';
-      resultEl.textContent = '请填写名称、主机和用户名';
+      resultEl.textContent = isLocal ? '请填写名称' : '请填写名称、主机和用户名';
       return;
     }
     if (data.auth_type === 'key' && !data.key_content && !data.key_path && !data.id) {

@@ -15,16 +15,26 @@ from ssh_manager import SSHError, ssh_manager
 # 事件回调：async def emit(event: dict) -> None
 EmitFn = Callable[[dict], Awaitable[None]]
 
-SYSTEM_PROMPT = """你是一位资深 Linux SRE 运维专家，负责通过 SSH 远程排查服务器上的服务故障。
+SYSTEM_PROMPT = """你是一位资深 SRE 运维专家，负责通过 SSH（或本机模式）排查服务器上的服务故障。
 
 # 你的能力
 你可以调用以下工具在目标服务器上执行命令并获取信息：
 - run_command(server_id, cmd, description): 在服务器上执行 shell 命令
 - read_file(server_id, path, tail_lines): 读取文件末尾 N 行
-- get_service_status(service, server_id): 查看服务状态与最近日志
+- get_service_status(service, server_id): 查看服务状态
 - check_port(port, server_id): 检查端口占用
 - check_resources(server_id): 查看 CPU/内存/磁盘
-- list_services(server_id): 列出服务单元
+- list_services(server_id): 列出服务
+
+# 目标系统差异（务必先确认目标系统）
+可用服务器列表标注了每台机器的 os（linux / windows）与是否本机模式（host=local）：
+- Linux：使用 bash 命令（systemctl / journalctl / ss / df / free / tail / top 等）。
+- Windows：默认 shell 是 cmd.exe，推荐用 powershell -NoProfile -Command "Get-..." 形式执行只读查询。
+  常用只读命令：Get-Service / Get-Process / Get-Content / Get-CimInstance / tasklist / netstat -ano / ipconfig / systeminfo / sc query <服务名>。
+  不要使用 systemctl、journalctl、ss、df、tail 等 Linux 专有命令；服务用 Get-Service，进程用 Get-Process，端口用 netstat -ano。
+- 本机模式（host=local）：命令直接在运行 ShellPilot 的机器上执行（Windows 上经由 PowerShell），语法跟随该机 os。
+- Windows 中文输出乱码时，可先执行 chcp 65001 切换代码页。
+- ForEach-Object / Invoke-Expression / -EncodedCommand 等可执行任意脚本的结构会被判为危险操作，只读排查避免使用。
 
 # 行为规范
 1. 先观察再动手：优先只读排查（看状态、看日志、看进程、看端口、看资源），不要上来就改配置或重启服务。
@@ -33,7 +43,7 @@ SYSTEM_PROMPT = """你是一位资深 Linux SRE 运维专家，负责通过 SSH 
 4. 给出结论时必须附证据（引用命令输出的关键行），按"现象 → 原因 → 证据 → 修复建议 → 预防建议"格式输出。
 5. 如果不确定，明确说明"不确定"并给出进一步排查建议，不要编造。
 6. 危险操作（重启服务、杀进程、改配置、安装/卸载包等）会触发用户确认，请在调用前用 description 说明意图；用户拒绝后不要重复尝试同一操作。
-7. 绝对禁止执行破坏性命令（rm -rf /、mkfs、dd 写盘、fork bomb 等）。
+7. 绝对禁止执行破坏性命令（rm -rf /、mkfs、dd 写盘、fork bomb、format、diskpart 等）。
 8. 排查完成后给出最终诊断结论，不要无休止地执行命令；已有足够证据时就收敛。
 
 # 输出格式（最终结论用 Markdown）
@@ -49,7 +59,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "run_command",
-            "description": "在指定 Linux 服务器上执行 shell 命令，返回退出码、stdout、stderr。",
+            "description": "在指定服务器上执行命令（Linux 为 bash；Windows 为 cmd/PowerShell，取决于目标系统 os）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -65,7 +75,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "读取服务器上指定文件的末尾 N 行（等价 tail -n）。",
+            "description": "读取服务器上指定文件的末尾 N 行（Linux tail -n；Windows Get-Content -Tail）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -81,7 +91,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_service_status",
-            "description": "查看 systemd 服务状态与最近日志（systemctl status + journalctl）。",
+            "description": "查看服务状态（Linux: systemctl status + journalctl；Windows: Get-Service + sc qc）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -96,7 +106,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "check_port",
-            "description": "检查端口占用情况（ss -tlnp）。",
+            "description": "检查端口占用（Linux: ss -tlnp；Windows: Get-NetTCPConnection）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -125,7 +135,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "list_services",
-            "description": "列出 systemd 服务单元及其运行状态。",
+            "description": "列出服务及运行状态（Linux: systemd 服务单元；Windows: Get-Service）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -241,13 +251,18 @@ def _trim_history(history: list[dict], budget: int) -> tuple[list[dict], int]:
 
 
 _SAFE_PATH_RE = re.compile(r"^/[A-Za-z0-9._/@+-]*$")
+# Windows 路径：盘符开头；字符集排除 ; | & < > " ` $ % ! ^（shell 元字符），\w 含中文
+_SAFE_WIN_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]+[\w .,()\-\\/']*$")
 _SAFE_SERVICE_RE = re.compile(r"^[A-Za-z0-9._@:-]+$")
 
 
-def _safe_path(path: str) -> str:
-    """校验文件路径：必须是绝对路径且不含 shell 元字符。"""
+def _safe_path(path: str, windows: bool = False) -> str:
+    """校验文件路径：必须是绝对路径且不含 shell 元字符（Windows 允许盘符路径）。"""
     path = (path or "").strip()
-    if not path or not _SAFE_PATH_RE.match(path) or ".." in path:
+    if not path or ".." in path:
+        return ""
+    rx = _SAFE_WIN_PATH_RE if windows else _SAFE_PATH_RE
+    if not rx.match(path):
         return ""
     return path
 
@@ -263,6 +278,41 @@ def _safe_service(service: str) -> str:
 def _shell_quote(s: str) -> str:
     """POSIX shell 单引号转义。"""
     return "'" + s.replace("'", "'\"'\"'") + "'"
+
+
+# ---------- Windows 命令构造器（PowerShell 只读查询；安全分级见 safety.py） ----------
+
+def _win_ps_cmd(payload: str) -> str:
+    return f'powershell -NoProfile -Command "{payload}"'
+
+
+def _win_read_file_cmd(path: str, tail: int) -> str:
+    esc = path.replace("'", "''")  # PowerShell 单引号转义
+    return _win_ps_cmd(f"Get-Content -LiteralPath '{esc}' -Tail {tail}")
+
+
+def _win_service_cmd(service: str) -> str:
+    return _win_ps_cmd(
+        f"Get-Service '{service}' -ErrorAction SilentlyContinue | "
+        f"Format-List Name,DisplayName,Status,StartType; sc.exe qc '{service}'")
+
+
+def _win_port_cmd(port: int) -> str:
+    return _win_ps_cmd(
+        f"Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | "
+        "Select-Object LocalAddress,LocalPort,State,OwningProcess | Format-Table -AutoSize")
+
+
+_WIN_RESOURCES_CMD = _win_ps_cmd(
+    "Get-CimInstance Win32_Processor | Select-Object -First 1 LoadPercentage | Format-List; "
+    "Get-CimInstance Win32_OperatingSystem | Select-Object Caption,TotalVisibleMemorySize,"
+    "FreePhysicalMemory,LastBootUpTime | Format-List; "
+    "Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | "
+    "Select-Object DeviceID,Size,FreeSpace | Format-Table -AutoSize")
+
+_WIN_SERVICES_CMD = _win_ps_cmd(
+    "Get-Service | Sort-Object Status -Descending | "
+    "Select-Object -First 80 Status,Name,DisplayName | Format-Table -AutoSize")
 
 
 class AgentSession:
@@ -386,8 +436,11 @@ class AgentSession:
             return {"error": "未指定服务器，且会话没有默认服务器。请在下拉框中选择目标服务器。"}
 
         # 服务器归属校验：只能操作当前用户自己的服务器（多用户隔离）
-        if self.user_id is None or not get_server(str(server_id), self.user_id):
+        srv = get_server(str(server_id), self.user_id)
+        if self.user_id is None or not srv:
             return {"error": "服务器不存在或无权访问（服务器按用户隔离）"}
+        os_name = str(srv.get("os") or "linux").strip().lower()
+        is_win = os_name == "windows"
 
         if name == "run_command":
             cmd = args.get("cmd", "")
@@ -398,20 +451,31 @@ class AgentSession:
             return await self._exec_command(server_id, cmd, args.get("description", ""), tool_call_id)
 
         elif name == "read_file":
-            path = _safe_path(args.get("path", ""))
+            path = _safe_path(args.get("path", ""), windows=is_win)
             if not path:
-                return {"error": "path 参数非法（必须是普通绝对路径，不能含 shell 元字符）"}
+                hint = ("path 参数非法（Windows 需盘符绝对路径如 C:\\logs\\app.log，"
+                        "不能含 ; | & 等元字符）" if is_win
+                        else "path 参数非法（必须是普通绝对路径，不能含 shell 元字符）")
+                return {"error": hint}
             tail = max(1, min(int(args.get("tail_lines", 200) or 200), 5000))
-            cmd = f"tail -n {tail} {_shell_quote(path)}"
+            if is_win:
+                cmd = _win_read_file_cmd(path, tail)
+            else:
+                cmd = f"tail -n {tail} {_shell_quote(path)}"
             return await self._exec_command(server_id, cmd, f"读取文件 {path}", tool_call_id)
 
         elif name == "get_service_status":
             svc = _safe_service(args.get("service", ""))
             if not svc:
                 return {"error": "service 参数非法（只能是字母数字和 ._-:@）"}
-            cmd = (f"systemctl status {svc} --no-pager -l | head -60; "
-                   f"echo '--- journal ---'; journalctl -u {svc} -n 100 --no-pager | tail -100")
-            return await self._exec_command(server_id, cmd, f"查看服务 {svc} 状态与日志", tool_call_id)
+            if is_win:
+                cmd = _win_service_cmd(svc)
+                desc = f"查看服务 {svc} 状态"
+            else:
+                cmd = (f"systemctl status {svc} --no-pager -l | head -60; "
+                       f"echo '--- journal ---'; journalctl -u {svc} -n 100 --no-pager | tail -100")
+                desc = f"查看服务 {svc} 状态与日志"
+            return await self._exec_command(server_id, cmd, desc, tool_call_id)
 
         elif name == "check_port":
             try:
@@ -420,16 +484,26 @@ class AgentSession:
                 return {"error": "port 参数非法"}
             if not (1 <= port <= 65535):
                 return {"error": "port 超出范围（1-65535）"}
-            cmd = f"ss -tlnp | grep ':{port} ' || echo '端口 {port} 未被监听'"
+            if is_win:
+                cmd = _win_port_cmd(port)
+            else:
+                cmd = f"ss -tlnp | grep ':{port} ' || echo '端口 {port} 未被监听'"
             return await self._exec_command(server_id, cmd, f"检查端口 {port}", tool_call_id)
 
         elif name == "check_resources":
-            cmd = "echo '--- CPU/MEM ---'; top -bn1 | head -15; echo '--- DISK ---'; df -h; echo '--- FREE ---'; free -h"
+            if is_win:
+                cmd = _WIN_RESOURCES_CMD
+            else:
+                cmd = ("echo '--- CPU/MEM ---'; top -bn1 | head -15; "
+                       "echo '--- DISK ---'; df -h; echo '--- FREE ---'; free -h")
             return await self._exec_command(server_id, cmd, "查看系统资源", tool_call_id)
 
         elif name == "list_services":
-            cmd = "systemctl list-units --type=service --all --no-pager | head -80"
-            return await self._exec_command(server_id, cmd, "列出服务单元", tool_call_id)
+            if is_win:
+                cmd = _WIN_SERVICES_CMD
+            else:
+                cmd = "systemctl list-units --type=service --all --no-pager | head -80"
+            return await self._exec_command(server_id, cmd, "列出服务", tool_call_id)
 
         else:
             return {"error": f"未知工具: {name}"}
@@ -549,7 +623,9 @@ class AgentSession:
     def _build_system(self) -> str:
         servers = list_servers(self.user_id)
         server_lines = "\n".join(
-            f"- id={s['id']} name={s.get('name') or s['host']} host={s['host']} ({s.get('os', 'linux')})"
+            f"- id={s['id']} name={s.get('name') or s['host']} host={s['host']} "
+            f"os={s.get('os', 'linux')}"
+            + ("（本机模式：命令直接在本机执行）" if s.get("conn_type") == "local" else "")
             for s in servers
         )
         default_hint = f"\n当前会话默认服务器: {self.default_server_id}" if self.default_server_id else ""

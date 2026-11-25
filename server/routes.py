@@ -124,9 +124,14 @@ async def list_servers(request: web.Request) -> web.Response:
 
 async def add_server(request: web.Request) -> web.Response:
     body = await request.json()
-    required = ("name", "host", "username")
-    if not all(body.get(k) for k in required):
-        return web.json_response({"error": "缺少必填字段: name/host/username"}, status=400)
+    if str(body.get("conn_type") or "ssh") == "local":
+        # 本机模式：无需地址与凭据，服务端自动补全
+        if not body.get("name"):
+            return web.json_response({"error": "缺少必填字段: name"}, status=400)
+    else:
+        required = ("name", "host", "username")
+        if not all(body.get(k) for k in required):
+            return web.json_response({"error": "缺少必填字段: name/host/username"}, status=400)
     user_id = current_user_id(request)
     server = config_store.add_server(user_id, body)
     return web.json_response({"server": server})
@@ -158,6 +163,14 @@ async def test_server(request: web.Request) -> web.Response:
     if not config_store.get_server_raw(user_id, server_id):
         return web.json_response({"error": "服务器不存在"}, status=404)
     result = await asyncio.to_thread(ssh_manager.test_connection, server_id)
+    # 探活顺带识别出系统类型时，回写 servers.os（仅当原来未标注）
+    if result.get("success") and result.get("os"):
+        srv = config_store.get_server_raw(user_id, server_id)
+        if srv and not str(srv.get("os") or "").strip():
+            try:
+                config_store.update_server(user_id, server_id, {"os": result["os"]})
+            except Exception:
+                pass
     return web.json_response(result)
 
 

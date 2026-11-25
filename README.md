@@ -23,10 +23,12 @@ AI：❯ systemctl stop httpd          [危险·等待确认]
 
 - **对话式运维**：AI 自主规划步骤（状态 → 日志 → 进程 → 端口 → 资源），循环执行直到得出结论；诊断之后可以继续让它动手处理
 - **多服务器管理**：可视化增删改查，支持密码 / 私钥认证，一键测试连通性
+- **连接本机**：无需 SSH，一条「本机」配置即可让 AI 直接在本机执行命令（Windows 经 PowerShell，Linux 经 bash）
+- **Windows 服务器**：SSH 连接 Windows 主机（需安装 OpenSSH Server）后，AI 自动切换 PowerShell/cmd 命令（Get-Service / netstat -ano / sc query…），中文输出自动解码
 - **三级安全策略**：
-  - `SAFE` 只读命令（`ps`/`journalctl`/`tail`/`ss`/`df`/只读 `docker`/`kubectl`/`git`…）**自动执行**
-  - `DANGEROUS` 危险操作（`systemctl restart`/`kill`/`rm`/`chmod`…）**弹窗确认后执行**
-  - `FORBIDDEN` 绝对禁止（`rm -rf /`/`mkfs`/`dd` 写盘/fork bomb…）**直接拦截**
+  - `SAFE` 只读命令（`ps`/`journalctl`/`tail`/`ss`/`df`/`Get-Service`/`tasklist`/`netstat`/只读 `docker`/`kubectl`/`git`…）**自动执行**
+  - `DANGEROUS` 危险操作（`systemctl restart`/`kill`/`rm`/`chmod`/`Remove-Item`/`taskkill`/`reg add`/`net stop`…）**弹窗确认后执行**
+  - `FORBIDDEN` 绝对禁止（`rm -rf /`/`mkfs`/`dd` 写盘/fork bomb/`format`/`diskpart`/`Format-Volume`/`wevtutil cl`…）**直接拦截**
   - 未知命令一律按危险处理；多命令（`&&`/`;`/`|`）取下最严格级别
 - **实时可视化**：WebSocket 推送 AI 思考过程、每条命令与完整输出（可折叠卡片）
 - **LLM 可配置**：任意兼容 OpenAI Chat Completions 协议的服务（DeepSeek / 通义 / Kimi / 私有部署…），在设置页填 Base URL + Key + 可选模型列表；对话输入框上方下拉框可随时切换模型
@@ -54,15 +56,27 @@ ShellPilot 启动: http://127.0.0.1:8765
   密码:   xxxxxxxxxxxxxxxx
 ```
 
-浏览器打开 http://127.0.0.1:8765 ，用上面的账号登录。忘记密码可在服务端执行 `python server/app.py --reset-password` 重置（旧密码与该账号所有登录会话立即失效）。登录后可在 **设置 → 账号安全** 里修改密码。
+浏览器打开 http://127.0.0.1:8765 ，用上面的账号登录。忘记密码可在服务端执行 `python server/app.py --reset-password` 重置（旧密码与该账号所有登录会话立即失效）。登录后可在顶栏 **账号** 页修改密码（修改后强制重新登录）。
 
 **多用户**：登录页提供「注册新账号」入口（默认开放，可用配置 `auth.allow_registration` 关闭）。每个账号有**完全独立**的 LLM 配置、服务器列表、会话历史与密码——新注册用户从空白配置开始，自己填 API Key、添加自己的服务器；管理员看不到也不动别人的配置。旧版本（账号/LLM/服务器存于 config.json）首次启动时自动迁入数据库并划归管理员。
 
 > 完整的环境准备、数据库建库、后台常驻、停止/重启、备份恢复与故障排查，见 [DEPLOY.md](DEPLOY.md)。
 
 1. 进入 **设置** → 填写 API Base URL、API Key、模型名称与可选模型列表（每行一个）→ 点「测试连接」→「保存」
-2. 进入 **服务器管理** → 添加 Linux 服务器 → 点「测试连接」确认 SSH 可达
+2. 进入 **服务器管理** → 添加服务器（或选「本机」连接方式）→ 点「测试连接」确认可达
 3. 回到 **对话** → 顶部选择目标服务器与使用模型 → 描述你的问题
+
+### 连接本机 / Windows 服务器
+
+- **本机模式**：添加服务器时「连接方式」选 **本机（免 SSH）**，只需填名称——命令直接在运行 ShellPilot 的这台电脑上以子进程执行（Windows 经 PowerShell、Linux 经 bash），系统类型自动识别，安全分级照常生效。适合让 AI 直接排查 ShellPilot 所在机器。
+- **远程 Windows**：在目标 Windows 机器上以管理员身份安装并启动 OpenSSH Server：
+  ```powershell
+  Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+  Set-Service sshd -StartupType Automatic
+  Start-Service sshd
+  ```
+  然后像添加 Linux 服务器一样填地址与凭据，「系统类型」选 **Windows**（不确定可先留 Linux 并点「测试连接」，会自动探测并回写）。AI 会自动使用 PowerShell/cmd 命令（`Get-Service`、`netstat -ano`、`sc query` 等），中文 GBK 输出自动解码。
+- 默认 shell 为 cmd.exe；复杂查询 AI 会自动用 `powershell -NoProfile -Command "Get-..."` 形式执行，只读查询自动放行，修改类操作仍需确认。
 
 > 服务默认仅监听 `127.0.0.1:8765`，不对外网开放；所有接口（含 WebSocket 与静态资源）都要求登录认证。如需远程访问，请自行加反向代理 + HTTPS，并了解认证与 Origin 校验的行为（见下文「安全说明」）。
 
@@ -141,6 +155,9 @@ python tests/test_agent_flow.py
 
 # 鉴权与访问控制（自起隔离服务 + 测试数据库，不碰真实配置）
 python tests/test_auth.py
+
+# Windows / 本机模式（安全分级矩阵 + 命令构造 + 本机子进程执行 + Agent 分流）
+python tests/test_windows_local.py
 
 # 集成测试（Mock LLM HTTP 服务；先以 SHELLPILOT_PASSWORD=test1234 启动 app.py，
 # 再以同名环境变量运行本测试）

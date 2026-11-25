@@ -256,9 +256,11 @@ def create_server(user_id: int, data: dict[str, Any]) -> dict[str, Any]:
         v = d.pop(k, None)
         if k == "port":
             try:
-                v = int(v or 22)
+                v = int(v) if v not in (None, "") else 22
             except (TypeError, ValueError):
                 v = 22
+        elif k == "auth_type" and v is None:
+            v = "password"  # 非空约束兜底（本机模式由 config 层写 "none"）
         cols[k] = v
     extra = d or None  # 剩余未知字段存 extra
     with _connect() as conn:
@@ -286,15 +288,23 @@ def update_server(user_id: int, server_id: str, updates: dict[str, Any]) -> Opti
     merged.pop("id", None)
     merged.update(dict(updates))
     merged.pop("id", None)
+    # 切回 SSH 后，本机模式暂存的原认证方式已消费——丢弃继承的标记，防回写 extra；
+    # host=None 是 config 层清掉的固化残留（本机→SSH 必须重填地址），恢复为
+    # 空串占位以满足 host 非空约束（连接时会因地址无效而报错提示用户重填）
+    if updates.get("_drop_auth_restore"):
+        merged.pop("_auth_type_restore", None)
+    updates.pop("_drop_auth_restore", None)
     d = dict(merged)
     cols: dict[str, Any] = {}
     for k in _SERVER_COLS:
         v = d.pop(k, None)
         if k == "port":
             try:
-                v = int(v or 22)
+                v = int(v) if v not in (None, "") else 22
             except (TypeError, ValueError):
                 v = 22
+        if k == "auth_type" and v is None:
+            v = "password"  # 非空约束兜底
         cols[k] = v
     extra = d or None
     with _connect() as conn:

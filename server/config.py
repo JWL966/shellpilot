@@ -1,5 +1,6 @@
 """配置管理：读写 config.json（LLM 设置 + 服务器列表 + 认证/SSH 安全选项）。"""
 import hashlib
+import getpass
 import hmac
 import ipaddress
 import json
@@ -463,9 +464,67 @@ def get_server_raw(user_id: int, server_id: str) -> Optional[dict[str, Any]]:
     return session_store.get_server(server_id, user_id)
 
 
+def _normalize_server(server: dict[str, Any], *, partial: bool = False) -> None:
+    """校验/规范化 conn_type 与 os 字段（conn_type 存于 servers.extra JSONB）。
+
+    partial=False（新增）：补全默认值；本机模式自动填 host=local / 当前系统类型。
+    partial=True（更新）：只校验出现的字段；与本机模式互转时做对应修正。
+    """
+    ct = str(server.get("conn_type") or "").strip().lower()
+    if ct in ("ssh", "local"):
+        server["conn_type"] = ct
+    elif partial:
+        server.pop("conn_type", None)
+    else:
+        server["conn_type"] = "ssh"
+
+    if server.get("conn_type") == "local":
+        # 本机模式：地址固定 local，系统类型以宿主机为准（不信任前端传入）。
+        # 原认证方式暂存 extra（本机把它固定成 none，切回 SSH 时要恢复原值）；
+        # 调用方（update_server）会把原记录的 auth_type 预先放进 updates。
+        if str(server.get("auth_type") or "") not in ("", "none"):
+            server["_auth_type_restore"] = str(server["auth_type"])
+        server["host"] = "local"
+        server["auth_type"] = "none"  # servers.auth_type 非空约束；本机无凭据
+        if not partial:
+            server["port"] = 0
+            if not str(server.get("username") or "").strip():
+                server["username"] = getpass.getuser()
+        server["os"] = "windows" if os.name == "nt" else "linux"
+        return
+
+    # 以下为 SSH 分支
+    # auth_type 只在新增时补默认值——部分更新不得改写认证方式，
+    # 否则 {"name": ...} 或 {"os": ...} 这类最小更新会把 key 覆写成 password
+    # （本机→SSH 切换场景由下方 was_local 修正恢复默认值）
+    if not partial and not str(server.get("auth_type") or "").strip():
+        server["auth_type"] = "password"
+
+    was_local = bool(server.pop("_was_local", False)) if partial else False
+
+    os_v = str(server.get("os") or "").strip().lower()
+    if os_v in ("linux", "windows"):
+        server["os"] = os_v
+    elif not partial:
+        server["os"] = "linux"
+    else:
+        server.pop("os", None)
+
+    # 连接方式从本机切回 SSH：host/os 是本机模式的固化值（host=local、os=宿主机），
+    # 直接沿用会让 SSH 连接必然失败——host 必须重新提供，os 清空待重新探测。
+    # 认证方式恢复已由 update_server 直接写入 updates（显式值），这里不重复处理。
+    if was_local:
+        if str(server.get("host") or "") == "local":
+            server["host"] = None
+        if "os" not in server:
+            server["os"] = None
+        server.pop("_auth_type_restore", None)
+
+
 def add_server(user_id: int, server: dict[str, Any]) -> dict[str, Any]:
     server = dict(server)
     server["id"] = server.get("id") or uuid.uuid4().hex[:12]
+    _normalize_server(server)
     created = session_store.create_server(user_id, server)
     return _server_view(created)
 
@@ -476,6 +535,38 @@ def update_server(user_id: int, server_id: str, updates: dict[str, Any]) -> Opti
     # password 为全星号 = 保持原密码不变
     if updates.get("password") and set(str(updates["password"])) == {"*"}:
         updates.pop("password", None)
+    # 感知原记录的连接方式：
+    # - 原为本机 → SSH 切换时修正被固化的 host/os；任何不含 conn_type 的部分更新
+    #   也不得绕过本机模式对 os/auth_type/port 的锁定（_was_local 标记由 normalize 处理）
+    current = session_store.get_server(server_id, user_id)
+    was_local = bool(current) and str(current.get("conn_type") or "") == "local"
+    if was_local and not str(updates.get("conn_type") or "").strip():
+        updates["conn_type"] = "local"  # 锁定：本机服务器的部分更新不改变连接方式
+    elif str(updates.get("conn_type") or "").strip().lower() == "local":
+        # SSH → 本机：把原记录的认证方式带进 normalize，由它暂存进 extra
+        if str(updates.get("auth_type") or "").strip() in ("", "none"):
+            updates["auth_type"] = str((current or {}).get("auth_type") or "")
+    elif str(updates.get("conn_type") or "").strip().lower() == "ssh" and was_local:
+        updates["_was_local"] = True
+        # 原认证方式：本机化时暂存进 extra 后会展开为顶层键，其次取当前值；
+        # 本机模式固定成 none 不是有效 SSH 认证，最终兜底 password
+        saved = str(current.get("_auth_type_restore") or "")
+        if saved in ("password", "key") and "auth_type" not in updates:
+            updates["auth_type"] = saved  # 直接显式恢复，避免依赖 merge 语义
+        elif "auth_type" not in updates:
+            updates["auth_type"] = "password" if not str(current.get("auth_type") or "").strip() \
+                or str(current["auth_type"]) == "none" else str(current["auth_type"])
+        # host=local 是本机固化残留：updates 未提供新 host 时置 ""（空串满足
+        # host 非空约束，连接时因地址无效报错提示用户重填；merge 不会用空串覆盖
+        # current 的 local，因为 dict.update 会用 "" 覆盖）
+        if "host" not in updates and str(current.get("host") or "") == "local":
+            updates["host"] = ""
+    _normalize_server(updates, partial=True)
+    # 本机→SSH 切换完成后，残留的暂存标记已无意义：显式丢弃，防止 merge 阶段
+    # 又把 current 顶层的旧标记存回 extra
+    if str(updates.get("conn_type") or "") == "ssh":
+        updates["_drop_auth_restore"] = True
+    updates.pop("_was_local", None)
     updated = session_store.update_server(user_id, server_id, updates)
     return _server_view(updated) if updated else None
 

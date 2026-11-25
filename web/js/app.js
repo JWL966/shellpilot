@@ -95,7 +95,9 @@ const App = {
     this.state.servers.forEach(s => {
       const opt = document.createElement('option');
       opt.value = s.id;
-      opt.textContent = `${s.name || s.host} (${s.host})`;
+      opt.textContent = s.conn_type === 'local'
+        ? `${s.name || '本机'}（本机）`
+        : `${s.name || s.host} (${s.host})`;
       if (s.id === current) opt.selected = true;
       select.appendChild(opt);
     });
